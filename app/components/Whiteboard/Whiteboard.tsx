@@ -201,8 +201,15 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
           backgroundColor: currentPage?.backgroundColor || '#ffffff',
         }),
       });
-      const newPage = await res.json();
-      newPage.strokes = [];
+      const raw = await res.json();
+      const newPage: Page = {
+        id: raw.id,
+        sessionId: raw.session_id,
+        position: raw.position,
+        backgroundPattern: raw.background_pattern || 'blank',
+        backgroundColor: raw.background_color || '#ffffff',
+        strokes: [],
+      };
       setPages(prev => {
         const next = [...prev];
         next.splice(position, 0, newPage);
@@ -391,8 +398,15 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
                   backgroundColor: currentPage?.backgroundColor || '#ffffff',
                 }),
               });
-              const newPage = await res.json();
-              newPage.strokes = [stroke];
+              const raw2 = await res.json();
+              const newPage: Page = {
+                id: raw2.id,
+                sessionId: raw2.session_id,
+                position: raw2.position,
+                backgroundPattern: raw2.background_pattern || 'blank',
+                backgroundColor: raw2.background_color || '#ffffff',
+                strokes: [stroke],
+              };
               setPages(prev => {
                 const next = [...prev];
                 next.splice(position, 0, newPage);
