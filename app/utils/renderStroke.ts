@@ -1,6 +1,6 @@
 import { Stroke, ImageStroke } from '@/app/types';
-import { drawFreehandStroke } from './drawStroke';
-import { drawLineStroke, drawRectStroke, drawEllipseStroke } from './drawShape';
+import { drawFreehandStroke, drawMarkerStroke } from './drawStroke';
+import { drawLineStroke, drawRectStroke, drawTriangleStroke, drawEllipseStroke } from './drawShape';
 import { getCachedImage, loadImage } from './imageCache';
 
 export function renderStroke(
@@ -12,11 +12,17 @@ export function renderStroke(
     case 'freehand':
       drawFreehandStroke(ctx, stroke);
       break;
+    case 'marker':
+      drawMarkerStroke(ctx, stroke);
+      break;
     case 'line':
       drawLineStroke(ctx, stroke);
       break;
     case 'rect':
       drawRectStroke(ctx, stroke);
+      break;
+    case 'triangle':
+      drawTriangleStroke(ctx, stroke);
       break;
     case 'ellipse':
       drawEllipseStroke(ctx, stroke);
@@ -54,8 +60,13 @@ export function renderAllStrokes(
   onImageLoad?: () => void,
   skipStrokeId?: string
 ): void {
+  // Render images first (background), then drawings on top
   for (const stroke of strokes) {
     if (skipStrokeId && stroke.id === skipStrokeId) continue;
-    renderStroke(ctx, stroke, onImageLoad);
+    if (stroke.type === 'image') renderStroke(ctx, stroke, onImageLoad);
+  }
+  for (const stroke of strokes) {
+    if (skipStrokeId && stroke.id === skipStrokeId) continue;
+    if (stroke.type !== 'image') renderStroke(ctx, stroke, onImageLoad);
   }
 }

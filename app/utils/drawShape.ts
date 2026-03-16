@@ -1,4 +1,4 @@
-import { LineStroke, RectStroke, EllipseStroke, Point, StrokeStyle } from '@/app/types';
+import { LineStroke, RectStroke, TriangleStroke, EllipseStroke, Point, StrokeStyle } from '@/app/types';
 
 function applyStyle(ctx: CanvasRenderingContext2D, style: StrokeStyle) {
   ctx.strokeStyle = style.color;
@@ -22,6 +22,20 @@ export function drawRectStroke(ctx: CanvasRenderingContext2D, stroke: RectStroke
   const w = Math.abs(stroke.end.x - stroke.start.x);
   const h = Math.abs(stroke.end.y - stroke.start.y);
   ctx.strokeRect(x, y, w, h);
+}
+
+export function drawTriangleStroke(ctx: CanvasRenderingContext2D, stroke: TriangleStroke): void {
+  applyStyle(ctx, stroke.style);
+  const x = Math.min(stroke.start.x, stroke.end.x);
+  const y = Math.min(stroke.start.y, stroke.end.y);
+  const w = Math.abs(stroke.end.x - stroke.start.x);
+  const h = Math.abs(stroke.end.y - stroke.start.y);
+  ctx.beginPath();
+  ctx.moveTo(x + w / 2, y);
+  ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x, y + h);
+  ctx.closePath();
+  ctx.stroke();
 }
 
 export function drawEllipseStroke(ctx: CanvasRenderingContext2D, stroke: EllipseStroke): void {
@@ -57,6 +71,25 @@ export function drawRectPreview(
   const w = Math.abs(end.x - start.x);
   const h = Math.abs(end.y - start.y);
   ctx.strokeRect(x, y, w, h);
+}
+
+export function drawTrianglePreview(
+  ctx: CanvasRenderingContext2D,
+  start: Point,
+  end: Point,
+  style: StrokeStyle
+): void {
+  applyStyle(ctx, style);
+  const x = Math.min(start.x, end.x);
+  const y = Math.min(start.y, end.y);
+  const w = Math.abs(end.x - start.x);
+  const h = Math.abs(end.y - start.y);
+  ctx.beginPath();
+  ctx.moveTo(x + w / 2, y);
+  ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x, y + h);
+  ctx.closePath();
+  ctx.stroke();
 }
 
 export function drawEllipsePreview(

@@ -19,6 +19,7 @@ export default function SessionList() {
   const [loaded, setLoaded] = useState(false);
   const [navigatingId, setNavigatingId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
   const editRef = useRef<HTMLInputElement>(null);
@@ -45,6 +46,7 @@ export default function SessionList() {
     const handler = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuId(null);
+        setConfirmDeleteId(null);
       }
     };
     document.addEventListener('mousedown', handler);
@@ -63,7 +65,7 @@ export default function SessionList() {
 
   const deleteSession = async (id: string) => {
     setMenuId(null);
-    if (!confirm('Delete this whiteboard?')) return;
+    setConfirmDeleteId(null);
     await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
     setSessions(prev => prev.filter(s => s.id !== id));
   };
@@ -236,15 +238,32 @@ export default function SessionList() {
                             Clone
                           </button>
                           <div className="h-px bg-white/10 my-1" />
-                          <button
-                            className="w-full px-3 py-1.5 text-left text-sm text-red-400 bg-transparent border-none cursor-pointer hover:bg-red-500/10 flex items-center gap-2"
-                            onClick={() => deleteSession(session.id)}
-                          >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                            </svg>
-                            Delete
-                          </button>
+                          {confirmDeleteId === session.id ? (
+                            <div className="flex items-center gap-1 px-2 py-1">
+                              <button
+                                className="flex-1 px-2 py-1.5 text-xs text-red-400 font-medium bg-red-500/15 border border-red-500/30 rounded cursor-pointer hover:bg-red-500/25 transition-colors"
+                                onClick={() => deleteSession(session.id)}
+                              >
+                                Delete
+                              </button>
+                              <button
+                                className="flex-1 px-2 py-1.5 text-xs text-neutral-400 bg-transparent border border-white/10 rounded cursor-pointer hover:bg-white/10 transition-colors"
+                                onClick={() => setConfirmDeleteId(null)}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              className="w-full px-3 py-1.5 text-left text-sm text-red-400 bg-transparent border-none cursor-pointer hover:bg-red-500/10 flex items-center gap-2"
+                              onClick={() => setConfirmDeleteId(session.id)}
+                            >
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                              </svg>
+                              Delete
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>

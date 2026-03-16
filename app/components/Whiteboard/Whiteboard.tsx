@@ -36,7 +36,13 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     color: '#000000',
     baseWidth: 4,
   });
+  const [markerStyle, setMarkerStyle] = useState<StrokeStyle>({
+    color: '#facc15',
+    baseWidth: 24,
+  });
   const [zoom, setZoom] = useState(1);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [showCheatsheet, setShowCheatsheet] = useState(false);
 
   const strokes = page?.strokes ?? [];
 
@@ -242,7 +248,13 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
   const zoomReset = useCallback(() => {
     setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
   }, []);
+
+  // Refs for callbacks used in keyboard handler (defined later in the file)
+  const handleExportPngRef = useRef<() => void>(() => {});
+  const handleExportPdfRef = useRef<() => void>(() => {});
+  const handleImportPdfRef = useRef<() => void>(() => {});
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -267,12 +279,42 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       } else if (isCmd && e.key === '0') {
         e.preventDefault();
         zoomReset();
-      } else if (!isCmd && !e.altKey) {
+      } else if (isCmd && e.shiftKey && e.key.toLowerCase() === 'e') {
+        e.preventDefault();
+        handleExportPngRef.current();
+      } else if (isCmd && e.shiftKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleExportPdfRef.current();
+      } else if (isCmd && e.shiftKey && e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        handleImportPdfRef.current();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowCheatsheet(v => {
+          if (v) return false;
+          setActiveTool('pen');
+          return false;
+        });
+      } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        e.preventDefault();
+        setShowCheatsheet(v => !v);
+      } else if (e.key === '1' && !isCmd) {
+        setStrokeStyle(s => ({ ...s, baseWidth: 2 }));
+      } else if (e.key === '2' && !isCmd) {
+        setStrokeStyle(s => ({ ...s, baseWidth: 4 }));
+      } else if (e.key === '3' && !isCmd) {
+        setStrokeStyle(s => ({ ...s, baseWidth: 8 }));
+      } else if (e.key === '4' && !isCmd) {
+        setStrokeStyle(s => ({ ...s, baseWidth: 16 }));
+      } else if (!isCmd && !e.altKey && !e.shiftKey) {
         switch (e.key.toLowerCase()) {
           case 'p': setActiveTool('pen'); break;
+          case 'm': setActiveTool('marker'); break;
           case 'e': setActiveTool('eraser'); break;
+          case 'h': setActiveTool('hand'); break;
           case 'l': setActiveTool('line'); break;
           case 'r': setActiveTool('rect'); break;
+          case 't': setActiveTool('triangle'); break;
           case 'o': setActiveTool('ellipse'); break;
         }
       }
@@ -468,6 +510,11 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     await exportAllPagesAsPdf([page], sessionName);
   }, [page, sessionName]);
 
+  // Keep refs in sync for keyboard handler
+  handleExportPngRef.current = handleExportPng;
+  handleExportPdfRef.current = handleExportPdf;
+  handleImportPdfRef.current = handleImportPdf;
+
   const handleImageTransform = useCallback((strokeId: string, newStroke: ImageStroke) => {
     const pageId = page?.id;
     if (!pageId) return;
@@ -485,24 +532,33 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       <Canvas
         strokes={strokes}
         activeTool={activeTool}
-        strokeStyle={strokeStyle}
+        strokeStyle={activeTool === 'marker' ? markerStyle : strokeStyle}
         backgroundColor={page.backgroundColor}
         backgroundPattern={page.backgroundPattern}
         scale={zoom}
+        panOffset={panOffset}
         onStrokeComplete={handleStrokeComplete}
         onStrokeDelete={handleStrokeDelete}
         onImageTransform={handleImageTransform}
         onToolChange={setActiveTool}
         onZoomChange={setZoom}
+        onPanChange={setPanOffset}
       />
       <Toolbar
         activeTool={activeTool}
         strokeStyle={strokeStyle}
+        markerStyle={markerStyle}
         backgroundPattern={page.backgroundPattern}
         backgroundColor={page.backgroundColor}
         onToolChange={setActiveTool}
-        onColorChange={color => setStrokeStyle(s => ({ ...s, color }))}
-        onWidthChange={baseWidth => setStrokeStyle(s => ({ ...s, baseWidth }))}
+        onColorChange={color => {
+          if (activeTool === 'marker') setMarkerStyle(s => ({ ...s, color }));
+          else setStrokeStyle(s => ({ ...s, color }));
+        }}
+        onWidthChange={baseWidth => {
+          if (activeTool === 'marker') setMarkerStyle(s => ({ ...s, baseWidth }));
+          else setStrokeStyle(s => ({ ...s, baseWidth }));
+        }}
         onBackgroundPatternChange={handleBackgroundPatternChange}
         onBackgroundColorChange={handleBackgroundColorChange}
         onUndo={undo}
@@ -511,6 +567,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         onImportPdf={handleImportPdf}
         onExportPng={handleExportPng}
         onExportPdf={handleExportPdf}
+        onShowCheatsheet={() => setShowCheatsheet(true)}
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
       />
@@ -524,6 +581,111 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         backgroundPattern={page.backgroundPattern}
         backgroundColor={page.backgroundColor}
       />
+      {showCheatsheet && <Cheatsheet onClose={() => setShowCheatsheet(false)} />}
     </>
+  );
+}
+
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);
+const MOD = isMac ? '\u2318' : 'Ctrl';
+const SHIFT = isMac ? '\u21E7' : 'Shift';
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-neutral-700/60 text-neutral-300 text-[11px] font-mono leading-none border border-neutral-600/40">
+      {children}
+    </kbd>
+  );
+}
+
+function ShortcutRow({ keys, label }: { keys: string[]; label: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-1">
+      <span className="text-neutral-400 text-sm">{label}</span>
+      <span className="flex items-center gap-1">
+        {keys.map((k, i) => <Kbd key={i}>{k}</Kbd>)}
+      </span>
+    </div>
+  );
+}
+
+function Cheatsheet({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+      <div
+        className="relative bg-neutral-900/95 border border-neutral-700/50 rounded-2xl shadow-2xl p-6 max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto animate-slide-up"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-white text-lg font-semibold m-0">Keyboard Shortcuts</h2>
+          <button
+            className="w-7 h-7 rounded-md flex items-center justify-center text-neutral-500 hover:text-white hover:bg-white/10 transition-colors border-none bg-transparent cursor-pointer"
+            onClick={onClose}
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-0">
+          {/* Tools */}
+          <div>
+            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Tools</div>
+            <ShortcutRow keys={['H']} label="Hand / Pan" />
+            <ShortcutRow keys={['P']} label="Pen" />
+            <ShortcutRow keys={['M']} label="Marker" />
+            <ShortcutRow keys={['E']} label="Eraser" />
+            <ShortcutRow keys={['L']} label="Line" />
+            <ShortcutRow keys={['R']} label="Rectangle" />
+            <ShortcutRow keys={['T']} label="Triangle" />
+            <ShortcutRow keys={['O']} label="Ellipse" />
+            <ShortcutRow keys={['Esc']} label="Back to Pen" />
+          </div>
+
+          {/* Stroke width */}
+          <div>
+            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Stroke Width</div>
+            <ShortcutRow keys={['1']} label="Thin (2px)" />
+            <ShortcutRow keys={['2']} label="Normal (4px)" />
+            <ShortcutRow keys={['3']} label="Thick (8px)" />
+            <ShortcutRow keys={['4']} label="Heavy (16px)" />
+          </div>
+
+          {/* Navigation */}
+          <div>
+            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Navigation</div>
+            <ShortcutRow keys={[MOD, '+']} label="Zoom in" />
+            <ShortcutRow keys={[MOD, '\u2212']} label="Zoom out" />
+            <ShortcutRow keys={[MOD, '0']} label="Reset zoom & pan" />
+            <ShortcutRow keys={['Space', 'Drag']} label="Pan canvas" />
+            <ShortcutRow keys={['Scroll']} label="Pan canvas" />
+            <ShortcutRow keys={[MOD, 'Scroll']} label="Zoom" />
+          </div>
+
+          {/* Edit */}
+          <div>
+            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Edit</div>
+            <ShortcutRow keys={[MOD, 'Z']} label="Undo" />
+            <ShortcutRow keys={[MOD, SHIFT, 'Z']} label="Redo" />
+            <ShortcutRow keys={[MOD, 'V']} label="Paste image" />
+            <ShortcutRow keys={['Shift']} label="Snap shape / lock ratio" />
+          </div>
+
+          {/* Import / Export */}
+          <div>
+            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Import / Export</div>
+            <ShortcutRow keys={[MOD, SHIFT, 'I']} label="Import PDF" />
+            <ShortcutRow keys={[MOD, SHIFT, 'E']} label="Export as PNG" />
+            <ShortcutRow keys={[MOD, SHIFT, 'S']} label="Export as PDF" />
+          </div>
+
+          {/* Help */}
+          <div>
+            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Help</div>
+            <ShortcutRow keys={['?']} label="Toggle this cheatsheet" />
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

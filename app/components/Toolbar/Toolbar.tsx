@@ -6,6 +6,7 @@ import { ToolType, StrokeStyle, BackgroundPattern } from '@/app/types';
 interface ToolbarProps {
   activeTool: ToolType;
   strokeStyle: StrokeStyle;
+  markerStyle: StrokeStyle;
   backgroundPattern: BackgroundPattern;
   backgroundColor: string;
   onToolChange: (tool: ToolType) => void;
@@ -19,12 +20,15 @@ interface ToolbarProps {
   onImportPdf: () => void;
   onExportPng: () => void;
   onExportPdf: () => void;
+  onShowCheatsheet: () => void;
   canUndo: boolean;
   canRedo: boolean;
 }
 
-const COLORS = ['#000000', '#e53e3e', '#3182ce', '#38a169', '#dd6b20', '#ffffff'];
-const WIDTHS = [2, 4, 8, 16];
+const PEN_COLORS = ['#000000', '#e53e3e', '#3182ce', '#38a169', '#dd6b20', '#805ad5', '#ffffff'];
+const MARKER_COLORS = ['#facc15', '#fb923c', '#f87171', '#a78bfa', '#34d399', '#38bdf8'];
+const PEN_WIDTHS = [2, 4, 8, 16];
+const MARKER_WIDTHS = [12, 20, 28, 40];
 
 const BG_COLORS = [
   { color: '#ffffff', label: 'White' },
@@ -33,7 +37,7 @@ const BG_COLORS = [
   { color: '#111111', label: 'Dark' },
 ];
 
-const SHAPE_TOOLS: ToolType[] = ['line', 'rect', 'ellipse'];
+const SHAPE_TOOLS: ToolType[] = ['line', 'rect', 'triangle', 'ellipse'];
 
 const BG_PATTERNS: { pattern: BackgroundPattern; label: string; icon: React.ReactNode }[] = [
   { pattern: 'blank', label: 'Blank', icon: <BlankBgIcon /> },
@@ -45,6 +49,7 @@ const BG_PATTERNS: { pattern: BackgroundPattern; label: string; icon: React.Reac
 export default function Toolbar({
   activeTool,
   strokeStyle,
+  markerStyle,
   backgroundPattern,
   backgroundColor,
   onToolChange,
@@ -58,46 +63,72 @@ export default function Toolbar({
   onImportPdf,
   onExportPng,
   onExportPdf,
+  onShowCheatsheet,
   canUndo,
   canRedo,
 }: ToolbarProps) {
   const [shapesOpen, setShapesOpen] = useState(false);
+  const [colorsOpen, setColorsOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const shapesRef = useRef<HTMLDivElement>(null);
+  const colorsRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
 
   const activeShape = SHAPE_TOOLS.includes(activeTool) ? activeTool : 'line';
   const isShapeActive = SHAPE_TOOLS.includes(activeTool);
+  const prevToolRef = useRef(activeTool);
 
   useEffect(() => {
     const handler = (e: PointerEvent) => {
       if (shapesRef.current && !shapesRef.current.contains(e.target as Node)) setShapesOpen(false);
+      if (colorsRef.current && !colorsRef.current.contains(e.target as Node)) setColorsOpen(false);
       if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false);
     };
     document.addEventListener('pointerdown', handler);
     return () => document.removeEventListener('pointerdown', handler);
   }, []);
 
+  // Auto-expand shapes flyout when switching to a shape tool (e.g. via keyboard)
+  useEffect(() => {
+    if (SHAPE_TOOLS.includes(activeTool) && !SHAPE_TOOLS.includes(prevToolRef.current)) {
+      setShapesOpen(true);
+      setColorsOpen(false);
+      setMoreOpen(false);
+    }
+    prevToolRef.current = activeTool;
+  }, [activeTool]);
+
+  const closeAllMenus = () => { setShapesOpen(false); setColorsOpen(false); setMoreOpen(false); };
+
   return (
     <>
     {/* Invisible backdrop to catch clicks when menus are open — prevents canvas from drawing */}
-    {(shapesOpen || moreOpen) && (
+    {(shapesOpen || colorsOpen || moreOpen) && (
       <div
         className="fixed inset-0 z-40"
         onPointerDown={(e) => {
           e.stopPropagation();
           e.preventDefault();
-          setShapesOpen(false);
-          setMoreOpen(false);
+          closeAllMenus();
         }}
       />
     )}
     <div className="fixed top-1/2 left-2 -translate-y-1/2 z-50 bg-neutral-900/85 backdrop-blur-md rounded-xl p-2 flex flex-col gap-1 shadow-xl">
-      {/* === QUICK ACCESS === */}
+      {/* === TOOLS === */}
+
+      {/* Hand / Pan */}
+      <ToolBtn active={activeTool === 'hand'} onClick={() => onToolChange('hand')} title="Hand / Pan (H)">
+        <HandIcon />
+      </ToolBtn>
 
       {/* Pen */}
       <ToolBtn active={activeTool === 'pen'} onClick={() => onToolChange('pen')} title="Pen (P)">
         <PenIcon />
+      </ToolBtn>
+
+      {/* Marker */}
+      <ToolBtn active={activeTool === 'marker'} onClick={() => onToolChange('marker')} title="Marker (M)">
+        <MarkerIcon />
       </ToolBtn>
 
       {/* Eraser */}
@@ -111,7 +142,7 @@ export default function Toolbar({
           active={isShapeActive}
           onClick={() => {
             if (!isShapeActive) { onToolChange(activeShape); }
-            else { setShapesOpen(!shapesOpen); setMoreOpen(false); }
+            else { setShapesOpen(!shapesOpen); setColorsOpen(false); setMoreOpen(false); }
           }}
           title={shapeLabel(activeShape)}
           badge="&#x25B8;"
@@ -133,34 +164,64 @@ export default function Toolbar({
 
       <Divider />
 
-      {/* Colors */}
-      <div className="flex flex-col items-center gap-1">
-        {COLORS.map(color => (
-          <button key={color}
-            className={`w-7 h-7 rounded-full cursor-pointer transition-transform hover:scale-115 border-2
-              ${strokeStyle.color === color ? 'border-blue-400' : 'border-transparent'}`}
-            style={{ backgroundColor: color }}
-            onClick={() => onColorChange(color)} title={color} />
-        ))}
-        <input type="color" value={strokeStyle.color}
-          onChange={e => onColorChange(e.target.value)}
-          className="w-7 h-7 rounded-full cursor-pointer bg-transparent border-none p-0"
-          title="Custom color" />
-      </div>
+      {/* Color (grouped) — switches palette for marker vs pen */}
+      {(() => {
+        const isMarker = activeTool === 'marker';
+        const currentStyle = isMarker ? markerStyle : strokeStyle;
+        const colors = isMarker ? MARKER_COLORS : PEN_COLORS;
+        const widths = isMarker ? MARKER_WIDTHS : PEN_WIDTHS;
+        return (
+          <>
+            <div className="relative" ref={colorsRef}>
+              <button
+                className="w-10 h-10 rounded-lg flex items-center justify-center cursor-pointer transition-colors border-none relative bg-transparent hover:bg-white/10"
+                onClick={() => { setColorsOpen(!colorsOpen); setShapesOpen(false); setMoreOpen(false); }}
+                title="Color"
+              >
+                <span
+                  className="block w-6 h-6 rounded-full border-2 border-neutral-600"
+                  style={{ backgroundColor: currentStyle.color }}
+                />
+                <span className="absolute right-0.5 bottom-0.5 text-[8px] text-neutral-500" dangerouslySetInnerHTML={{ __html: '&#x25B8;' }} />
+              </button>
+              {colorsOpen && (
+                <div className="absolute left-12 top-0 bg-neutral-900/95 backdrop-blur-md rounded-lg p-2 shadow-xl border border-neutral-700/50 animate-menu-in">
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {colors.map(color => (
+                      <button key={color}
+                        className={`w-7 h-7 rounded-full cursor-pointer transition-transform hover:scale-115 border-2
+                          ${currentStyle.color === color ? 'border-blue-400' : 'border-transparent'}`}
+                        style={{ backgroundColor: color }}
+                        onClick={() => { onColorChange(color); setColorsOpen(false); }} title={color} />
+                    ))}
+                    <label className="w-7 h-7 rounded-full cursor-pointer border-2 border-neutral-600 overflow-hidden relative flex items-center justify-center hover:scale-115 transition-transform" title="Custom color">
+                      <span className="text-neutral-400 text-xs">+</span>
+                      <input type="color" value={currentStyle.color}
+                        onChange={e => { onColorChange(e.target.value); setColorsOpen(false); }}
+                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
+                    </label>
+                  </div>
+                </div>
+              )}
+            </div>
 
-      <Divider />
-
-      {/* Widths */}
-      <div className="flex flex-col items-center gap-1">
-        {WIDTHS.map(w => (
-          <button key={w}
-            className={`w-10 h-8 rounded-md flex items-center justify-center cursor-pointer transition-colors border-none
-              ${strokeStyle.baseWidth === w ? 'bg-blue-500/30' : 'bg-transparent hover:bg-white/10'}`}
-            onClick={() => onWidthChange(w)} title={`${w}px`}>
-            <span className="block rounded-full bg-neutral-400" style={{ width: w, height: w, minWidth: 2, minHeight: 2 }} />
-          </button>
-        ))}
-      </div>
+            {/* Widths — visual dots scaled to 3-12px range */}
+            <div className="flex flex-col items-center gap-1">
+              {widths.map((w, i) => {
+                const dotSize = 3 + (i / (widths.length - 1)) * 9;
+                return (
+                  <button key={w}
+                    className={`w-10 h-8 rounded-md flex items-center justify-center cursor-pointer transition-colors border-none
+                      ${currentStyle.baseWidth === w ? 'bg-blue-500/30' : 'bg-transparent hover:bg-white/10'}`}
+                    onClick={() => onWidthChange(w)} title={`${w}px`}>
+                    <span className="block rounded-full bg-neutral-400" style={{ width: dotSize, height: dotSize }} />
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        );
+      })()}
 
       <Divider />
 
@@ -176,7 +237,7 @@ export default function Toolbar({
 
       {/* === MORE MENU === */}
       <div className="relative" ref={moreRef}>
-        <ToolBtn active={false} onClick={() => { setMoreOpen(!moreOpen); setShapesOpen(false); }} title="More options">
+        <ToolBtn active={false} onClick={() => { setMoreOpen(!moreOpen); setShapesOpen(false); setColorsOpen(false); }} title="More options">
           <MoreIcon />
         </ToolBtn>
         {moreOpen && (
@@ -224,9 +285,21 @@ export default function Toolbar({
 
             {/* Clear */}
             <MenuBtn onClick={() => { onClear(); setMoreOpen(false); }} icon={<TrashIcon />} label="Clear page" danger />
+
+            <div className="w-full h-px bg-white/10" />
+
+            {/* Keyboard shortcuts */}
+            <MenuBtn onClick={() => { onShowCheatsheet(); setMoreOpen(false); }} icon={<KeyboardIcon />} label="Keyboard shortcuts" />
           </div>
         )}
       </div>
+
+      <Divider />
+
+      {/* Keyboard shortcuts */}
+      <ToolBtn active={false} onClick={onShowCheatsheet} title="Keyboard shortcuts (?)">
+        <span className="text-base font-bold leading-none">?</span>
+      </ToolBtn>
     </div>
     </>
   );
@@ -280,6 +353,7 @@ function shapeIcon(type: ToolType) {
   switch (type) {
     case 'line': return <LineIcon />;
     case 'rect': return <RectIcon />;
+    case 'triangle': return <TriangleIcon />;
     case 'ellipse': return <EllipseIcon />;
     default: return null;
   }
@@ -289,6 +363,7 @@ function shapeLabel(type: ToolType) {
   switch (type) {
     case 'line': return 'Line (L)';
     case 'rect': return 'Rectangle (R)';
+    case 'triangle': return 'Triangle (T)';
     case 'ellipse': return 'Ellipse (O)';
     default: return '';
   }
@@ -299,14 +374,23 @@ function shapeLabel(type: ToolType) {
 function PenIcon() {
   return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></svg>);
 }
+function MarkerIcon() {
+  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15.5 3.5L22 10l-8 8-6.5-6.5z" /><path d="M7.5 11.5L2 22l10.5-5.5" /><path d="M15.5 3.5l-3 3" /><path d="M14 14l3-3" /></svg>);
+}
 function EraserIcon() {
   return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21" /><path d="M22 21H7" /><path d="m5 11 9 9" /></svg>);
+}
+function HandIcon() {
+  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 11V6a2 2 0 0 0-4 0v1" /><path d="M14 10V4a2 2 0 0 0-4 0v2" /><path d="M10 10.5V6a2 2 0 0 0-4 0v8" /><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" /></svg>);
 }
 function LineIcon() {
   return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="5" y1="19" x2="19" y2="5" /></svg>);
 }
 function RectIcon() {
   return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /></svg>);
+}
+function TriangleIcon() {
+  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3L22 21H2z" /></svg>);
 }
 function EllipseIcon() {
   return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="12" cy="12" rx="10" ry="7" /></svg>);
@@ -322,6 +406,9 @@ function TrashIcon() {
 }
 function MoreIcon() {
   return (<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg>);
+}
+function KeyboardIcon() {
+  return (<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2" /><path d="M6 8h.001" /><path d="M10 8h.001" /><path d="M14 8h.001" /><path d="M18 8h.001" /><path d="M6 12h.001" /><path d="M10 12h.001" /><path d="M14 12h.001" /><path d="M18 12h.001" /><path d="M8 16h8" /></svg>);
 }
 function FileExportIcon() {
   return (<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><polyline points="12 18 12 12" /><polyline points="9 15 12 12 15 15" /></svg>);

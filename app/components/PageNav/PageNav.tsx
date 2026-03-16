@@ -30,7 +30,7 @@ export default function PageNav({
   backgroundColor,
 }: PageNavProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [thumbW, setThumbW] = useState(Math.round(THUMB_H * (typeof window !== 'undefined' ? window.innerWidth / window.innerHeight : 16 / 9)));
+  const [thumbW, setThumbW] = useState(Math.round(THUMB_H * 16 / 9));
 
   const renderThumb = useCallback(() => {
     const canvas = canvasRef.current;

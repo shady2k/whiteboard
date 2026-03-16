@@ -41,6 +41,21 @@ export interface EllipseStroke {
   style: StrokeStyle;
 }
 
+export interface TriangleStroke {
+  type: 'triangle';
+  id: string;
+  start: Point;
+  end: Point;
+  style: StrokeStyle;
+}
+
+export interface MarkerStroke {
+  type: 'marker';
+  id: string;
+  points: Point[];
+  style: StrokeStyle;
+}
+
 export interface ImageStroke {
   type: 'image';
   id: string;
@@ -52,7 +67,7 @@ export interface ImageStroke {
   opacity?: number; // 0-1, default 1
 }
 
-export type Stroke = FreehandStroke | LineStroke | RectStroke | EllipseStroke | ImageStroke;
+export type Stroke = FreehandStroke | MarkerStroke | LineStroke | RectStroke | TriangleStroke | EllipseStroke | ImageStroke;
 
 export type BackgroundPattern = 'blank' | 'grid' | 'dotgrid' | 'ruled';
 
@@ -73,7 +88,7 @@ export interface Session {
   updatedAt: string;
 }
 
-export type ToolType = 'pen' | 'eraser' | 'line' | 'rect' | 'ellipse';
+export type ToolType = 'pen' | 'marker' | 'eraser' | 'hand' | 'line' | 'rect' | 'triangle' | 'ellipse';
 
 export type Command =
   | { type: 'createStroke'; pageId: string; stroke: Stroke }

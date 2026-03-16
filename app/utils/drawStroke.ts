@@ -1,10 +1,53 @@
-import { FreehandStroke, Point } from '@/app/types';
+import { FreehandStroke, MarkerStroke, Point } from '@/app/types';
+import getStroke from 'perfect-freehand';
 
-const MIN_PRESSURE_FACTOR = 0.3;
+/**
+ * Convert perfect-freehand outline points into a single SVG-like path
+ * using quadratic bezier curves for smoothness, then fill it.
+ */
+function fillOutline(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, outline: number[][], color: string): void {
+  if (outline.length < 2) return;
 
-function getWidth(baseWidth: number, pressure: number): number {
-  return baseWidth * (MIN_PRESSURE_FACTOR + pressure * (1 - MIN_PRESSURE_FACTOR));
+  ctx.beginPath();
+  ctx.moveTo(outline[0][0], outline[0][1]);
+
+  for (let i = 1; i < outline.length - 1; i++) {
+    const curr = outline[i];
+    const next = outline[i + 1];
+    const mx = (curr[0] + next[0]) / 2;
+    const my = (curr[1] + next[1]) / 2;
+    ctx.quadraticCurveTo(curr[0], curr[1], mx, my);
+  }
+
+  const last = outline[outline.length - 1];
+  ctx.lineTo(last[0], last[1]);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
 }
+
+function pointsToInput(points: Point[]): number[][] {
+  return points.map(p => [p.x, p.y, p.pressure]);
+}
+
+const PEN_OPTIONS = {
+  thinning: 0.3,
+  smoothing: 0.5,
+  streamline: 0.5,
+  simulatePressure: false,
+  start: { taper: false, cap: true },
+  end: { taper: false, cap: true },
+  last: true,
+};
+
+const MARKER_OPTIONS = {
+  thinning: 0,        // uniform width — markers don't taper
+  smoothing: 0.5,
+  streamline: 0.4,
+  simulatePressure: false,
+  start: { taper: false },
+  end: { taper: false },
+};
 
 export function drawFreehandStroke(
   ctx: CanvasRenderingContext2D,
@@ -13,53 +56,21 @@ export function drawFreehandStroke(
   const { points, style } = stroke;
   if (points.length === 0) return;
 
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.strokeStyle = style.color;
-
   if (points.length === 1) {
-    const p = points[0];
-    const r = getWidth(style.baseWidth, p.pressure) / 2;
+    const r = style.baseWidth / 2;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.arc(points[0].x, points[0].y, r, 0, Math.PI * 2);
     ctx.fillStyle = style.color;
     ctx.fill();
     return;
   }
 
-  // Draw segments with varying width based on pressure
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i];
-    const p1 = points[i + 1];
-    const avgPressure = (p0.pressure + p1.pressure) / 2;
-    const width = getWidth(style.baseWidth, avgPressure);
+  const outline = getStroke(pointsToInput(points), {
+    size: style.baseWidth,
+    ...PEN_OPTIONS,
+  });
 
-    ctx.lineWidth = width;
-    ctx.beginPath();
-
-    if (i === 0) {
-      ctx.moveTo(p0.x, p0.y);
-    } else {
-      // Use midpoint of previous segment as start for smooth curve
-      const prev = points[i - 1];
-      const mx = (prev.x + p0.x) / 2;
-      const my = (prev.y + p0.y) / 2;
-      ctx.moveTo(mx, my);
-    }
-
-    // Quadratic bezier through midpoint for smoothness
-    if (i < points.length - 2) {
-      const mid = {
-        x: (p0.x + p1.x) / 2,
-        y: (p0.y + p1.y) / 2,
-      };
-      ctx.quadraticCurveTo(p0.x, p0.y, mid.x, mid.y);
-    } else {
-      ctx.lineTo(p1.x, p1.y);
-    }
-
-    ctx.stroke();
-  }
+  fillOutline(ctx, outline, style.color);
 }
 
 export function drawFreehandPoints(
@@ -70,6 +81,60 @@ export function drawFreehandPoints(
 ): void {
   drawFreehandStroke(ctx, {
     type: 'freehand',
+    id: '',
+    points,
+    style: { color, baseWidth },
+  });
+}
+
+export function drawMarkerStroke(
+  ctx: CanvasRenderingContext2D,
+  stroke: MarkerStroke
+): void {
+  const { points, style } = stroke;
+  if (points.length === 0) return;
+
+  // Compute bounding box for the offscreen canvas
+  const outline = getStroke(pointsToInput(points), {
+    size: style.baseWidth,
+    ...MARKER_OPTIONS,
+  });
+  if (outline.length < 2) return;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of outline) {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+
+  const pad = 2;
+  minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+  const w = Math.ceil(maxX - minX);
+  const h = Math.ceil(maxY - minY);
+  if (w <= 0 || h <= 0) return;
+
+  // Draw opaque on offscreen canvas, then composite with alpha
+  const offscreen = new OffscreenCanvas(w, h);
+  const octx = offscreen.getContext('2d')!;
+  octx.translate(-minX, -minY);
+  fillOutline(octx, outline, style.color);
+
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+  ctx.drawImage(offscreen, minX, minY);
+  ctx.restore();
+}
+
+export function drawMarkerPoints(
+  ctx: CanvasRenderingContext2D,
+  points: Point[],
+  color: string,
+  baseWidth: number
+): void {
+  drawMarkerStroke(ctx, {
+    type: 'marker',
     id: '',
     points,
     style: { color, baseWidth },
