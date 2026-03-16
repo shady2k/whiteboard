@@ -18,6 +18,25 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 });
   }
 
+  // Check actionId for deduplication (atomic via INSERT OR IGNORE + check)
+  const actionId = formData.get('actionId') as string | null;
+  if (actionId) {
+    const db = getDb();
+    // Try to claim the action ID first — if it already exists, return cached result
+    const inserted = db.prepare(
+      'INSERT OR IGNORE INTO action_log (action_id, type, result, created_at) VALUES (?, ?, NULL, ?)'
+    ).run(actionId, 'assetUpload', new Date().toISOString());
+    if (inserted.changes === 0) {
+      // Another request already claimed this action ID
+      const existing = db.prepare('SELECT result FROM action_log WHERE action_id = ?').get(actionId) as { result: string | null } | undefined;
+      if (existing?.result) {
+        return NextResponse.json(JSON.parse(existing.result), { status: 201 });
+      }
+      // result is NULL — another request is still processing, tell client to retry
+      return NextResponse.json({ error: 'Action in progress' }, { status: 409 });
+    }
+  }
+
   if (!ALLOWED_MIME_TYPES.has(file.type)) {
     return NextResponse.json({ error: 'File type not allowed. Use PNG, JPEG, WebP, or GIF.' }, { status: 400 });
   }
@@ -42,7 +61,16 @@ export async function POST(request: Request) {
     'INSERT INTO assets (id, mime_type, file_path, size, created_at) VALUES (?, ?, ?, ?, ?)'
   ).run(assetId, file.type, fileName, buffer.length, new Date().toISOString());
 
-  return NextResponse.json({ id: assetId, mimeType: file.type, size: buffer.length }, { status: 201 });
+  const result = { id: assetId, mimeType: file.type, size: buffer.length };
+
+  // Update action log with result
+  if (actionId) {
+    db.prepare(
+      'UPDATE action_log SET result = ? WHERE action_id = ?'
+    ).run(JSON.stringify(result), actionId);
+  }
+
+  return NextResponse.json(result, { status: 201 });
 }
 
 // GET /api/assets?id=xxx — serve an asset file

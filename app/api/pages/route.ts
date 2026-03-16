@@ -35,8 +35,22 @@ export async function POST(request: Request) {
 
 // PUT /api/pages — update page background
 export async function PUT(request: Request) {
-  const { pageId, backgroundPattern, backgroundColor } = await request.json();
+  const { pageId, backgroundPattern, backgroundColor, actionId } = await request.json();
   const db = getDb();
+
+  // Atomic dedup: claim the action ID first
+  if (actionId) {
+    const inserted = db.prepare(
+      'INSERT OR IGNORE INTO action_log (action_id, type, result, created_at) VALUES (?, ?, NULL, ?)'
+    ).run(actionId, 'backgroundSync', new Date().toISOString());
+    if (inserted.changes === 0) {
+      const existing = db.prepare('SELECT result FROM action_log WHERE action_id = ?').get(actionId) as { result: string | null } | undefined;
+      if (existing?.result) {
+        return NextResponse.json(JSON.parse(existing.result));
+      }
+      return NextResponse.json({ error: 'Action in progress' }, { status: 409 });
+    }
+  }
 
   const transaction = db.transaction(() => {
     db.prepare(
@@ -52,7 +66,14 @@ export async function PUT(request: Request) {
   });
   transaction();
 
-  return NextResponse.json({ ok: true });
+  const result = { ok: true };
+
+  // Update action log with result
+  if (actionId) {
+    db.prepare('UPDATE action_log SET result = ? WHERE action_id = ?').run(JSON.stringify(result), actionId);
+  }
+
+  return NextResponse.json(result);
 }
 
 // DELETE /api/pages — delete a page

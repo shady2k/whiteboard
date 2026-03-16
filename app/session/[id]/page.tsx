@@ -1,6 +1,5 @@
-import { notFound } from 'next/navigation';
 import getDb from '@/app/lib/db';
-import Whiteboard from '@/app/components/Whiteboard/Whiteboard';
+import WhiteboardLoader from '@/app/components/Whiteboard/WhiteboardLoader';
 import { Page } from '@/app/types';
 
 interface SessionRow {
@@ -35,8 +34,17 @@ export default async function SessionPage({
   const db = getDb();
 
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
+
+  // If session doesn't exist on server (e.g. created offline), render with empty
+  // initialPages — WhiteboardLoader will load data from IDB
   if (!session) {
-    notFound();
+    return (
+      <WhiteboardLoader
+        sessionId={id}
+        initialPages={[]}
+        sessionName="Untitled"
+      />
+    );
   }
 
   const pageRows = db.prepare(
@@ -63,7 +71,7 @@ export default async function SessionPage({
   });
 
   return (
-    <Whiteboard
+    <WhiteboardLoader
       sessionId={id}
       initialPages={pages}
       sessionName={session.name}

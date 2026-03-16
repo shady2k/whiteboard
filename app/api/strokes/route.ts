@@ -29,8 +29,22 @@ export async function POST(request: Request) {
 
 // PUT /api/strokes — replace all strokes for a page (used after clear/undo)
 export async function PUT(request: Request) {
-  const { pageId, sessionId, strokes } = await request.json();
+  const { pageId, sessionId, strokes, actionId } = await request.json();
   const db = getDb();
+
+  // Atomic dedup: claim the action ID first
+  if (actionId) {
+    const inserted = db.prepare(
+      'INSERT OR IGNORE INTO action_log (action_id, type, result, created_at) VALUES (?, ?, NULL, ?)'
+    ).run(actionId, 'pageSync', new Date().toISOString());
+    if (inserted.changes === 0) {
+      const existing = db.prepare('SELECT result FROM action_log WHERE action_id = ?').get(actionId) as { result: string | null } | undefined;
+      if (existing?.result) {
+        return NextResponse.json(JSON.parse(existing.result));
+      }
+      return NextResponse.json({ error: 'Action in progress' }, { status: 409 });
+    }
+  }
   const now = new Date().toISOString();
 
   // Collect asset IDs referenced by old strokes before deleting
@@ -60,7 +74,14 @@ export async function PUT(request: Request) {
     cleanupOrphanedAssets(oldAssetIds);
   }
 
-  return NextResponse.json({ ok: true });
+  const result = { ok: true };
+
+  // Update action log with result
+  if (actionId) {
+    db.prepare('UPDATE action_log SET result = ? WHERE action_id = ?').run(JSON.stringify(result), actionId);
+  }
+
+  return NextResponse.json(result);
 }
 
 // DELETE /api/strokes — delete a stroke by id

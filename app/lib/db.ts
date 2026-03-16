@@ -58,6 +58,13 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_pages_session ON pages(session_id);
     CREATE INDEX IF NOT EXISTS idx_strokes_page ON strokes(page_id);
+
+    CREATE TABLE IF NOT EXISTS action_log (
+      action_id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      result TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // Migration: add thumbnail column if missing

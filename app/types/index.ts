@@ -100,3 +100,33 @@ export type Command =
   | { type: 'setPageBackground'; pageId: string; oldPattern: BackgroundPattern; oldColor: string; newPattern: BackgroundPattern; newColor: string }
   | { type: 'pasteImage'; pageId: string; stroke: ImageStroke }
   | { type: 'transformImageStroke'; pageId: string; strokeId: string; oldStroke: ImageStroke; newStroke: ImageStroke };
+
+export interface DirtyPage {
+  pageId: string;
+  sessionId: string;
+  localUpdatedAt: number;
+}
+
+export interface LocalAsset {
+  id: string;
+  blob: Blob;
+  mimeType: string;
+  cachedAt: number;
+  pendingUpload: boolean;
+  contentHash: string;
+}
+
+export interface AssetMapping {
+  localId: string;
+  remoteId: string;
+}
+
+export type PendingActionType = 'assetUpload' | 'pageSync' | 'backgroundSync' | 'thumbnailSync' | 'sessionCreate' | 'sessionDelete';
+
+export interface PendingAction {
+  actionId: string;
+  type: PendingActionType;
+  payload: string;
+  createdAt: number;
+  status: 'pending' | 'inflight';
+}

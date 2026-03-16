@@ -19,12 +19,20 @@ export async function GET() {
 }
 
 // POST /api/sessions — create a new session
+// Accepts optional client-provided id and pageId for offline-first creation
 export async function POST(request: Request) {
-  const { name } = await request.json();
+  const body = await request.json();
+  const name = body.name;
   const db = getDb();
-  const sessionId = uuidv4();
-  const pageId = uuidv4();
+  const sessionId = body.id || uuidv4();
+  const pageId = body.pageId || uuidv4();
   const now = new Date().toISOString();
+
+  // If session already exists (offline-created, now syncing), skip
+  const existing = db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
+  if (existing) {
+    return NextResponse.json({ id: sessionId, name: name || 'Untitled', created_at: now, updated_at: now }, { status: 200 });
+  }
 
   const insertSession = db.prepare(
     'INSERT INTO sessions (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)'

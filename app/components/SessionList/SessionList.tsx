@@ -1,8 +1,22 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
+import { getAllSessions, putSession, putPage, putPendingAction, getPendingActions, clearPendingAction } from '@/app/lib/idb';
+import { v4 as uuidv4 } from 'uuid';
+import type { Page } from '@/app/types';
+
+function subscribeOnline(callback: () => void) {
+  window.addEventListener('online', callback);
+  window.addEventListener('offline', callback);
+  return () => {
+    window.removeEventListener('online', callback);
+    window.removeEventListener('offline', callback);
+  };
+}
+function getOnlineSnapshot() { return navigator.onLine; }
+function getServerSnapshot() { return true; }
 
 interface SessionSummary {
   id: string;
@@ -18,6 +32,8 @@ interface SessionSummary {
 export default function SessionList() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const onlineStatus = useSyncExternalStore(subscribeOnline, getOnlineSnapshot, getServerSnapshot);
+  const isOffline = !onlineStatus;
   const [navigatingId, setNavigatingId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -28,9 +44,58 @@ export default function SessionList() {
   const router = useRouter();
 
   useEffect(() => {
+    // Load from IDB first for instant display
+    getAllSessions().then(idbSessions => {
+      if (idbSessions.length > 0) {
+        const mapped: SessionSummary[] = idbSessions.map(s => ({
+          id: s.id,
+          name: s.name,
+          created_at: s.createdAt,
+          updated_at: s.updatedAt,
+          page_count: 0,
+          thumbnail: s.thumbnail,
+          bg_color: null,
+          bg_pattern: null,
+        }));
+        setSessions(mapped);
+        setLoaded(true);
+      }
+    }).catch(() => {});
+
+    // Then fetch from server and merge with IDB sessions
     fetch('/api/sessions')
       .then(r => r.json())
-      .then(data => { setSessions(data); setLoaded(true); })
+      .then(async (serverData: SessionSummary[]) => {
+        // Merge: server sessions + any IDB-only sessions (e.g. created offline)
+        const serverIds = new Set(serverData.map((s: SessionSummary) => s.id));
+        const idbSessions = await getAllSessions();
+        const idbOnly = idbSessions
+          .filter(s => !serverIds.has(s.id))
+          .map(s => ({
+            id: s.id,
+            name: s.name,
+            created_at: s.createdAt,
+            updated_at: s.updatedAt,
+            page_count: 0,
+            thumbnail: s.thumbnail,
+            bg_color: null,
+            bg_pattern: null,
+          } as SessionSummary));
+
+        setSessions([...serverData, ...idbOnly]);
+        setLoaded(true);
+
+        // Update IDB cache with server data
+        for (const s of serverData) {
+          putSession({
+            id: s.id,
+            name: s.name,
+            createdAt: s.created_at,
+            updatedAt: s.updated_at,
+            thumbnail: s.thumbnail,
+          }).catch(() => {});
+        }
+      })
       .catch(() => setLoaded(true));
   }, []);
 
@@ -55,23 +120,100 @@ export default function SessionList() {
   }, [menuId]);
 
   const createSession = async () => {
-    const res = await fetch('/api/sessions', {
+    const sessionId = uuidv4();
+    const pageId = uuidv4();
+    const now = new Date().toISOString();
+
+    // Always create in IDB first so it works offline
+    await putSession({
+      id: sessionId,
+      name: 'Untitled',
+      createdAt: now,
+      updatedAt: now,
+      thumbnail: null,
+    });
+    const newPage: Page = {
+      id: pageId,
+      sessionId,
+      position: 0,
+      backgroundPattern: 'blank',
+      backgroundColor: '#ffffff',
+      strokes: [],
+    };
+    await putPage(newPage, 0);
+
+    // Persist a pending action so the sync engine can replay it on reconnect
+    const actionId = uuidv4();
+    await putPendingAction({
+      actionId,
+      type: 'sessionCreate',
+      payload: JSON.stringify({ name: 'Untitled', id: sessionId, pageId }),
+      createdAt: Date.now(),
+      status: 'pending',
+    });
+
+    // Try to create on server immediately (non-blocking)
+    fetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Untitled' }),
-    });
-    const session = await res.json();
-    router.push(`/session/${session.id}`);
+      body: JSON.stringify({ name: 'Untitled', id: sessionId, pageId }),
+    }).then(async (res) => {
+      if (res.ok) {
+        await clearPendingAction(actionId);
+      }
+    }).catch(() => {});
+
+    if (isOffline) {
+      // Offline: use hard navigation so the SW serves cached app shell
+      window.location.href = `/session/${sessionId}`;
+    } else {
+      router.push(`/session/${sessionId}`);
+    }
   };
 
   const deleteSession = async (id: string) => {
     setMenuId(null);
     setConfirmDeleteId(null);
-    await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+
+    // Remove from IDB immediately
+    const { deleteSession: deleteIDBSession } = await import('@/app/lib/idb');
+    await deleteIDBSession(id);
     setSessions(prev => prev.filter(s => s.id !== id));
+
+    // Cancel any pending sessionCreate for this session (compaction)
+    const pending = await getPendingActions();
+    for (const action of pending) {
+      if (action.type === 'sessionCreate') {
+        try {
+          const payload = JSON.parse(action.payload);
+          if (payload.id === id) {
+            await clearPendingAction(action.actionId);
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Persist delete action and try server immediately
+    const deleteActionId = uuidv4();
+    await putPendingAction({
+      actionId: deleteActionId,
+      type: 'sessionDelete',
+      payload: JSON.stringify({ id }),
+      createdAt: Date.now(),
+      status: 'pending',
+    });
+
+    fetch(`/api/sessions/${id}`, { method: 'DELETE' })
+      .then(async (res) => {
+        if (res.ok || res.status === 404) {
+          await clearPendingAction(deleteActionId);
+        }
+      })
+      .catch(() => {});
   };
 
   const cloneSession = async (id: string) => {
+    if (isOffline) return;
     setMenuId(null);
     const res = await fetch(`/api/sessions/${id}`, { method: 'POST' });
     const cloned = await res.json();
@@ -88,6 +230,7 @@ export default function SessionList() {
 
   const commitRename = async () => {
     if (!editingId) return;
+    if (isOffline) { setEditingId(null); return; }
     const trimmed = editValue.trim();
     if (trimmed) {
       await fetch(`/api/sessions/${editingId}`, {
@@ -103,7 +246,11 @@ export default function SessionList() {
   const openSession = (id: string) => {
     if (editingId || menuId) return;
     setNavigatingId(id);
-    router.push(`/session/${id}`);
+    if (isOffline) {
+      window.location.href = `/session/${id}`;
+    } else {
+      router.push(`/session/${id}`);
+    }
   };
 
   const formatDate = (iso: string) => {
@@ -132,7 +279,23 @@ export default function SessionList() {
       <div className="max-w-5xl mx-auto px-6 pt-10 pb-10">
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
-          <h1 className="text-2xl font-semibold text-white tracking-tight">Whiteboard</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-semibold text-white tracking-tight">Whiteboard</h1>
+            {isOffline && (
+              <span className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-600/20 text-amber-400 text-xs" title="Offline — viewing cached data">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                  <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55" />
+                  <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39" />
+                  <path d="M10.71 5.05A16 16 0 0 1 22.56 9" />
+                  <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" />
+                  <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+                  <line x1="12" y1="20" x2="12.01" y2="20" />
+                </svg>
+                Offline
+              </span>
+            )}
+          </div>
           <button
             onClick={createSession}
             className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium cursor-pointer transition-colors hover:bg-blue-500 border-none flex items-center gap-2"

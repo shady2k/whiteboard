@@ -5,7 +5,9 @@ import { Stroke, ToolType, StrokeStyle, Command, Page, BackgroundPattern, ImageS
 import Canvas from '@/app/components/Canvas/Canvas';
 import Toolbar from '@/app/components/Toolbar/Toolbar';
 import PageNav from '@/app/components/PageNav/PageNav';
-import { useAutoSave } from '@/app/hooks/useAutoSave';
+import { useIDBState } from '@/app/hooks/useIDBState';
+import { useSyncEngine } from '@/app/hooks/useSyncEngine';
+import { saveUndoHistory, loadUndoHistory, putAsset } from '@/app/lib/idb';
 import { v4 as uuidv4 } from 'uuid';
 import { exportPageAsPng, exportAllPagesAsPdf, downloadBlob } from '@/app/utils/exportPage';
 import { drawBackground } from '@/app/utils/drawGrid';
@@ -28,6 +30,15 @@ function getImageDimensions(url: string): Promise<{ width: number; height: numbe
   });
 }
 
+async function computeContentHash(blob: Blob): Promise<string> {
+  const slice = blob.slice(0, 65536);
+  const buf = await slice.arrayBuffer();
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 interface WhiteboardProps {
   sessionId: string;
   initialPages: Page[];
@@ -37,7 +48,9 @@ interface WhiteboardProps {
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
 
 export default function Whiteboard({ sessionId, initialPages, sessionName: initialName }: WhiteboardProps) {
-  const [page, setPage] = useState<Page>(initialPages[0]);
+  const { page, setPage, isOffline } = useIDBState(sessionId, initialPages, initialName);
+  const { queuePageSync, queueBackgroundSync, tryThumbnailSync, isOnline, isSyncing } = useSyncEngine(sessionId);
+
   const [sessionName] = useState(initialName);
   const [activeTool, setActiveTool] = useState<ToolType>('pen');
   const [strokeStyle, setStrokeStyle] = useState<StrokeStyle>({
@@ -58,14 +71,33 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const [undoStack, setUndoStack] = useState<Command[]>([]);
   const [redoStack, setRedoStack] = useState<Command[]>([]);
 
-  // Autosave
-  const { saveStrokes, saveImmediate } = useAutoSave({
-    sessionId,
-    pageId: page?.id ?? '',
-  });
-
   const strokesRef = useRef(strokes);
   useEffect(() => { strokesRef.current = strokes; }, [strokes]);
+
+  const pageRef = useRef(page);
+  useEffect(() => { pageRef.current = page; }, [page]);
+
+  // Restore undo history from IDB on mount
+  useEffect(() => {
+    loadUndoHistory(sessionId).then((history) => {
+      if (history) {
+        setUndoStack(history.undoStack);
+        setRedoStack(history.redoStack);
+      }
+    }).catch(() => {});
+  }, [sessionId]);
+
+  // Persist undo history to IDB (debounced)
+  const undoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (undoSaveTimerRef.current) clearTimeout(undoSaveTimerRef.current);
+    undoSaveTimerRef.current = setTimeout(() => {
+      saveUndoHistory(sessionId, undoStack, redoStack).catch(() => {});
+    }, 1000);
+    return () => {
+      if (undoSaveTimerRef.current) clearTimeout(undoSaveTimerRef.current);
+    };
+  }, [sessionId, undoStack, redoStack]);
 
   // Generate and save thumbnail
   const thumbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -84,17 +116,12 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       ctx.scale(tw / vw, th / vh);
       drawBackground(ctx, vw, vh, page?.backgroundPattern || 'blank', page?.backgroundColor || '#ffffff');
       renderAllStrokes(ctx, strokesRef.current, () => {
-        // An image just finished loading — re-generate thumbnail
         generateAndSaveThumbRef.current?.();
       });
       const dataUrl = canvas.toDataURL('image/png', 0.7);
-      fetch(`/api/sessions/${sessionId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ thumbnail: dataUrl }),
-      }).catch(() => {});
+      tryThumbnailSync(dataUrl);
     } catch {}
-  }, [sessionId, page]);
+  }, [page, tryThumbnailSync]);
   useEffect(() => { generateAndSaveThumbRef.current = generateAndSaveThumb; }, [generateAndSaveThumb]);
 
   const saveThumbnail = useCallback(() => {
@@ -102,7 +129,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     thumbTimerRef.current = setTimeout(generateAndSaveThumb, 2000);
   }, [generateAndSaveThumb]);
 
-  // Trigger thumbnail save when strokes or background change
   useEffect(() => {
     saveThumbnail();
   }, [strokes, saveThumbnail, page?.backgroundPattern, page?.backgroundColor]);
@@ -112,7 +138,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       if (prev.id !== pageId) return prev;
       return { ...prev, strokes: updater(prev.strokes) };
     });
-  }, []);
+  }, [setPage]);
 
   const pushCommand = useCallback((cmd: Command) => {
     setUndoStack(prev => [...prev, cmd]);
@@ -124,8 +150,8 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     if (!pageId) return;
     updatePageStrokes(pageId, s => [...s, stroke]);
     pushCommand({ type: 'createStroke', pageId, stroke });
-    setTimeout(() => saveStrokes(strokesRef.current), 0);
-  }, [page?.id, updatePageStrokes, pushCommand, saveStrokes]);
+    setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
+  }, [page?.id, updatePageStrokes, pushCommand, queuePageSync]);
 
   const handleStrokeDelete = useCallback((strokeId: string) => {
     const pageId = page?.id;
@@ -134,8 +160,8 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     if (!stroke) return;
     updatePageStrokes(pageId, s => s.filter(st => st.id !== strokeId));
     pushCommand({ type: 'deleteStroke', pageId, strokeId, stroke });
-    setTimeout(() => saveStrokes(strokesRef.current), 0);
-  }, [page?.id, strokes, updatePageStrokes, pushCommand, saveStrokes]);
+    setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
+  }, [page?.id, strokes, updatePageStrokes, pushCommand, queuePageSync]);
 
   const undo = useCallback(() => {
     setUndoStack(prev => {
@@ -159,12 +185,8 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
             ? { ...p, backgroundPattern: cmd.oldPattern, backgroundColor: cmd.oldColor }
             : p
           );
-          // Persist background change from undo
-          fetch('/api/pages', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pageId: cmd.pageId, backgroundPattern: cmd.oldPattern, backgroundColor: cmd.oldColor }),
-          }).catch(() => {});
+          // Background change via sync engine
+          setTimeout(() => { if (pageRef.current) queueBackgroundSync(pageRef.current); }, 0);
           break;
         case 'transformImageStroke':
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.oldStroke : st));
@@ -172,10 +194,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       }
 
       setRedoStack(r => [...r, cmd]);
-      setTimeout(() => saveStrokes(strokesRef.current), 0);
+      setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
       return rest;
     });
-  }, [updatePageStrokes, saveStrokes]);
+  }, [updatePageStrokes, setPage, queuePageSync, queueBackgroundSync]);
 
   const redo = useCallback(() => {
     setRedoStack(prev => {
@@ -199,12 +221,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
             ? { ...p, backgroundPattern: cmd.newPattern, backgroundColor: cmd.newColor }
             : p
           );
-          // Persist background change from redo
-          fetch('/api/pages', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pageId: cmd.pageId, backgroundPattern: cmd.newPattern, backgroundColor: cmd.newColor }),
-          }).catch(() => {});
+          setTimeout(() => { if (pageRef.current) queueBackgroundSync(pageRef.current); }, 0);
           break;
         case 'transformImageStroke':
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.newStroke : st));
@@ -212,10 +229,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       }
 
       setUndoStack(u => [...u, cmd]);
-      setTimeout(() => saveStrokes(strokesRef.current), 0);
+      setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
       return rest;
     });
-  }, [updatePageStrokes, saveStrokes]);
+  }, [updatePageStrokes, setPage, queuePageSync, queueBackgroundSync]);
 
   const handleBackgroundPatternChange = useCallback(async (pattern: BackgroundPattern) => {
     const pageId = page?.id;
@@ -224,12 +241,8 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     const oldColor = page.backgroundColor;
     pushCommand({ type: 'setPageBackground', pageId, oldPattern, oldColor, newPattern: pattern, newColor: oldColor });
     setPage(p => ({ ...p, backgroundPattern: pattern }));
-    await fetch('/api/pages', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pageId, backgroundPattern: pattern, backgroundColor: oldColor }),
-    });
-  }, [page, pushCommand]);
+    setTimeout(() => { if (pageRef.current) queueBackgroundSync(pageRef.current); }, 0);
+  }, [page, pushCommand, setPage, queueBackgroundSync]);
 
   const handleBackgroundColorChange = useCallback(async (color: string) => {
     const pageId = page?.id;
@@ -238,20 +251,15 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     const oldColor = page.backgroundColor;
     pushCommand({ type: 'setPageBackground', pageId, oldPattern, oldColor, newPattern: oldPattern, newColor: color });
     setPage(p => ({ ...p, backgroundColor: color }));
-    await fetch('/api/pages', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pageId, backgroundPattern: oldPattern, backgroundColor: color }),
-    });
-  }, [page, pushCommand]);
+    setTimeout(() => { if (pageRef.current) queueBackgroundSync(pageRef.current); }, 0);
+  }, [page, pushCommand, setPage, queueBackgroundSync]);
 
   const clearCanvas = useCallback(() => {
-    const pageId = page?.id;
-    if (!pageId || strokes.length === 0) return;
-    pushCommand({ type: 'clearPage', pageId, strokes: [...strokes] });
-    updatePageStrokes(pageId, () => []);
-    saveImmediate([]);
-  }, [page?.id, strokes, pushCommand, updatePageStrokes, saveImmediate]);
+    if (!page || strokes.length === 0) return;
+    pushCommand({ type: 'clearPage', pageId: page.id, strokes: [...strokes] });
+    updatePageStrokes(page.id, () => []);
+    queuePageSync({ ...page, strokes: [] });
+  }, [page, strokes, pushCommand, updatePageStrokes, queuePageSync]);
 
   // Zoom controls
   const zoomIn = useCallback(() => {
@@ -273,12 +281,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     setPanOffset({ x: 0, y: 0 });
   }, []);
 
-  // Refs for callbacks used in keyboard handler (defined later in the file)
   const handleExportPngRef = useRef<() => void>(() => {});
   const handleExportPdfRef = useRef<() => void>(() => {});
   const handleImportFileRef = useRef<() => void>(() => {});
 
-  // PDF page selection dialog state
   const [pdfPageDialog, setPdfPageDialog] = useState<{ pdf: import('pdfjs-dist').PDFDocumentProxy; numPages: number } | null>(null);
 
   // Keyboard shortcuts
@@ -349,20 +355,26 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo, zoomIn, zoomOut, zoomReset]);
 
-  // Upload image to server and create ImageStroke
+  // Upload image — offline-capable with stable local IDs
   const uploadAndCreateImageStroke = useCallback(async (file: File | Blob, mimeType?: string): Promise<ImageStroke | null> => {
     const pageId = page?.id;
     if (!pageId) return null;
 
     try {
-      const formData = new FormData();
-      const actualFile = file instanceof Blob && !(file instanceof File)
-        ? new File([file], `paste-${Date.now()}.png`, { type: mimeType || 'image/png' })
-        : file;
-      formData.append('file', actualFile);
+      // Generate stable local ID
+      const localAssetId = `local-${uuidv4()}`;
+      const blob = file instanceof Blob ? file : file;
+      const contentHash = await computeContentHash(blob);
 
-      const res = await fetch('/api/assets', { method: 'POST', body: formData });
-      const { id: assetId } = await res.json();
+      // Store blob in IDB
+      await putAsset({
+        id: localAssetId,
+        blob,
+        mimeType: mimeType || file.type || 'image/png',
+        cachedAt: Date.now(),
+        pendingUpload: true,
+        contentHash,
+      });
 
       const url = URL.createObjectURL(file);
       const dims = await getImageDimensions(url);
@@ -381,7 +393,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       const stroke: ImageStroke = {
         type: 'image',
         id: uuidv4(),
-        assetId,
+        assetId: localAssetId,
         x, y,
         width: w,
         height: h,
@@ -389,7 +401,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
       return stroke;
     } catch (e) {
-      console.error('Failed to upload image:', e);
+      console.error('Failed to create image stroke:', e);
       return null;
     }
   }, [page?.id]);
@@ -527,10 +539,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   }, [page, strokes, sessionName]);
 
   const handleExportPdf = useCallback(async () => {
+    if (!page) return;
     await exportAllPagesAsPdf([page], sessionName);
   }, [page, sessionName]);
 
-  // Keep refs in sync for keyboard handler
   useEffect(() => { handleExportPngRef.current = handleExportPng; }, [handleExportPng]);
   useEffect(() => { handleExportPdfRef.current = handleExportPdf; }, [handleExportPdf]);
   useEffect(() => { handleImportFileRef.current = handleImportFile; }, [handleImportFile]);
@@ -542,13 +554,33 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     if (!oldStroke) return;
     pushCommand({ type: 'transformImageStroke', pageId, strokeId, oldStroke, newStroke });
     updatePageStrokes(pageId, s => s.map(st => st.id === strokeId ? newStroke : st));
-    setTimeout(() => saveStrokes(strokesRef.current), 0);
-  }, [page?.id, strokes, pushCommand, updatePageStrokes, saveStrokes]);
+    setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
+  }, [page?.id, strokes, pushCommand, updatePageStrokes, queuePageSync]);
 
-  if (!page) return null;
+  if (!page) {
+    return (
+      <div className="fixed inset-0 flex items-center justify-center" style={{ background: '#16161a' }}>
+        <div className="text-neutral-500 text-sm flex flex-col items-center gap-3">
+          <div className="w-6 h-6 rounded-full border-2 border-neutral-600 border-t-neutral-400 animate-spin" />
+          Loading whiteboard...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>
+      {/* Offline indicator */}
+      {(isOffline || !isOnline) && (
+        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[90] px-3 py-1.5 rounded-lg bg-amber-600/90 text-white text-xs font-medium backdrop-blur-sm shadow-lg">
+          Offline — changes saved locally
+        </div>
+      )}
+      {isSyncing && isOnline && (
+        <div className="fixed top-3 right-3 z-[90] px-2 py-1 rounded bg-blue-600/80 text-white text-[10px] backdrop-blur-sm">
+          Syncing...
+        </div>
+      )}
       <Canvas
         strokes={strokes}
         activeTool={activeTool}
@@ -730,7 +762,6 @@ function PdfPageDialog({ pdf, numPages, onConfirm, onCancel }: {
   const [selected, setSelected] = useState<Set<number>>(() => new Set(Array.from({ length: numPages }, (_, i) => i + 1)));
   const [thumbnails, setThumbnails] = useState<Map<number, string>>(new Map());
 
-  // Render page thumbnails on mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
