@@ -3,9 +3,10 @@
 import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { getAllSessions, putSession, putPage, putPendingAction, getPendingActions, clearPendingAction } from '@/app/lib/idb';
+import { getAllSessions, putSession, putPage, putPendingAction, getPendingActions, clearPendingAction, getPagesBySession } from '@/app/lib/idb';
 import { v4 as uuidv4 } from 'uuid';
 import type { Page } from '@/app/types';
+import WhiteboardLoader from '@/app/components/Whiteboard/WhiteboardLoader';
 
 function subscribeOnline(callback: () => void) {
   window.addEventListener('online', callback);
@@ -39,6 +40,7 @@ export default function SessionList() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [offlineSessionId, setOfflineSessionId] = useState<string | null>(null);
   const editRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
@@ -95,9 +97,63 @@ export default function SessionList() {
             thumbnail: s.thumbnail,
           }).catch(() => {});
         }
+
+        // Pre-cache page data for sessions that don't have pages in IDB yet.
+        // This ensures offline access to session content.
+        for (const s of serverData) {
+          getPagesBySession(s.id).then(async (idbPages) => {
+            if (idbPages.length > 0) return; // already cached
+            try {
+              const dataRes = await fetch(`/api/sessions/${s.id}/data`);
+              if (!dataRes.ok) return;
+              const data = await dataRes.json();
+              for (const sp of (data.pages || [])) {
+                const page: Page = {
+                  id: sp.id,
+                  sessionId: sp.session_id,
+                  position: sp.position,
+                  backgroundPattern: sp.background_pattern,
+                  backgroundColor: sp.background_color,
+                  strokes: (sp.strokes || []).map((st: Record<string, unknown>) => ({ ...st })),
+                };
+                await putPage(page, 0);
+              }
+            } catch { /* non-critical background caching */ }
+          }).catch(() => {});
+        }
       })
       .catch(() => setLoaded(true));
   }, []);
+
+  // Replay pending actions (sessionCreate/sessionDelete) when coming back online.
+  // The sync engine inside the Whiteboard only runs while a whiteboard is open,
+  // so we need this on the session list too.
+  useEffect(() => {
+    if (isOffline) return;
+    (async () => {
+      const pending = await getPendingActions();
+      for (const action of pending) {
+        try {
+          const payload = JSON.parse(action.payload);
+          if (action.type === 'sessionCreate') {
+            const res = await fetch('/api/sessions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            });
+            if (res.ok || res.status < 500) {
+              await clearPendingAction(action.actionId);
+            }
+          } else if (action.type === 'sessionDelete') {
+            const res = await fetch(`/api/sessions/${payload.id}`, { method: 'DELETE' });
+            if (res.ok || res.status < 500) {
+              await clearPendingAction(action.actionId);
+            }
+          }
+        } catch { /* will retry next time */ }
+      }
+    })();
+  }, [isOffline]);
 
   useEffect(() => {
     if (editingId && editRef.current) {
@@ -105,6 +161,18 @@ export default function SessionList() {
       editRef.current.select();
     }
   }, [editingId]);
+
+  // Handle browser back button when viewing a whiteboard inline
+  useEffect(() => {
+    if (!offlineSessionId) return;
+    const onPopState = () => {
+      if (!window.location.pathname.startsWith('/session/')) {
+        setOfflineSessionId(null);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [offlineSessionId]);
 
   // Close menu on click outside
   useEffect(() => {
@@ -164,8 +232,10 @@ export default function SessionList() {
     }).catch(() => {});
 
     if (isOffline) {
-      // Offline: use hard navigation so the SW serves cached app shell
-      window.location.href = `/session/${sessionId}`;
+      // Offline: render whiteboard inline instead of navigating — the SW can't
+      // serve an uncached /session/{id} page, so we stay in the SPA shell.
+      setOfflineSessionId(sessionId);
+      window.history.pushState(null, '', `/session/${sessionId}`);
     } else {
       router.push(`/session/${sessionId}`);
     }
@@ -245,10 +315,12 @@ export default function SessionList() {
 
   const openSession = (id: string) => {
     if (editingId || menuId) return;
-    setNavigatingId(id);
     if (isOffline) {
-      window.location.href = `/session/${id}`;
+      // Render whiteboard inline — no page navigation needed.
+      setOfflineSessionId(id);
+      window.history.pushState(null, '', `/session/${id}`);
     } else {
+      setNavigatingId(id);
       router.push(`/session/${id}`);
     }
   };
@@ -267,6 +339,19 @@ export default function SessionList() {
     if (diffDays < 7) return `${diffDays}d ago`;
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
+
+  // Offline: render whiteboard inline instead of navigating to a new page.
+  // The whiteboard will load its data from IndexedDB.
+  if (offlineSessionId) {
+    const sessionName = sessions.find(s => s.id === offlineSessionId)?.name || 'Untitled';
+    return (
+      <WhiteboardLoader
+        sessionId={offlineSessionId}
+        initialPages={[]}
+        sessionName={sessionName}
+      />
+    );
+  }
 
   return (
     <div

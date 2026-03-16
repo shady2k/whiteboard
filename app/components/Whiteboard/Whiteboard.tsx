@@ -7,7 +7,7 @@ import Toolbar from '@/app/components/Toolbar/Toolbar';
 import PageNav from '@/app/components/PageNav/PageNav';
 import { useIDBState } from '@/app/hooks/useIDBState';
 import { useSyncEngine } from '@/app/hooks/useSyncEngine';
-import { saveUndoHistory, loadUndoHistory, putAsset } from '@/app/lib/idb';
+import { saveUndoHistory, loadUndoHistory, putAsset, getSession, putSession } from '@/app/lib/idb';
 import { v4 as uuidv4 } from 'uuid';
 import { exportPageAsPng, exportAllPagesAsPdf, downloadBlob } from '@/app/utils/exportPage';
 import { drawBackground } from '@/app/utils/drawGrid';
@@ -119,9 +119,13 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         generateAndSaveThumbRef.current?.();
       });
       const dataUrl = canvas.toDataURL('image/png', 0.7);
+      // Always save thumbnail to IDB so the session list shows current preview
+      getSession(sessionId).then(s => {
+        if (s) putSession({ ...s, thumbnail: dataUrl }).catch(() => {});
+      }).catch(() => {});
       tryThumbnailSync(dataUrl);
     } catch {}
-  }, [page, tryThumbnailSync]);
+  }, [sessionId, page, tryThumbnailSync]);
   useEffect(() => { generateAndSaveThumbRef.current = generateAndSaveThumb; }, [generateAndSaveThumb]);
 
   const saveThumbnail = useCallback(() => {
@@ -132,6 +136,17 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   useEffect(() => {
     saveThumbnail();
   }, [strokes, saveThumbnail, page?.backgroundPattern, page?.backgroundColor]);
+
+  // Flush pending thumbnail immediately on unmount
+  useEffect(() => {
+    return () => {
+      if (thumbTimerRef.current) {
+        clearTimeout(thumbTimerRef.current);
+        thumbTimerRef.current = null;
+        generateAndSaveThumbRef.current?.();
+      }
+    };
+  }, []);
 
   const updatePageStrokes = useCallback((pageId: string, updater: (strokes: Stroke[]) => Stroke[]) => {
     setPage(prev => {
