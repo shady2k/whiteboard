@@ -43,17 +43,19 @@ export function useAutoSave({ sessionId, pageId, debounceMs = 500 }: AutoSaveOpt
   const pendingRef = useRef<Stroke[] | null>(null);
   const savingRef = useRef(false);
 
-  const doSave = useCallback(async (strokes: Stroke[]) => {
+  const doSave = useCallback(async (strokes: Stroke[]): Promise<boolean> => {
     try {
       await fetchWithRetry('/api/strokes', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pageId, sessionId, strokes }),
       });
+      return true;
     } catch (e) {
       console.error('Autosave failed after retries:', e);
       // Re-queue the data so next save attempt picks it up
       pendingRef.current = strokes;
+      return false;
     }
   }, [pageId, sessionId]);
 
@@ -62,12 +64,22 @@ export function useAutoSave({ sessionId, pageId, debounceMs = 500 }: AutoSaveOpt
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-    const strokes = pendingRef.current;
-    if (strokes === null || savingRef.current) return;
-    pendingRef.current = null;
+
+    if (savingRef.current) return;
+
     savingRef.current = true;
-    await doSave(strokes);
-    savingRef.current = false;
+    try {
+      while (true) {
+        const strokes = pendingRef.current;
+        if (strokes === null) break;
+
+        pendingRef.current = null;
+        const ok = await doSave(strokes);
+        if (!ok) break; // Leave pendingRef intact for online retry
+      }
+    } finally {
+      savingRef.current = false;
+    }
   }, [doSave]);
 
   const saveStrokes = useCallback((strokes: Stroke[]) => {
@@ -77,10 +89,16 @@ export function useAutoSave({ sessionId, pageId, debounceMs = 500 }: AutoSaveOpt
   }, [flush, debounceMs]);
 
   const saveImmediate = useCallback(async (strokes: Stroke[]) => {
+    // Cancel any pending debounced save
     pendingRef.current = null;
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
+    }
+    // Wait for any in-flight save to finish before sending ours
+    // This prevents a stale in-flight PUT from overwriting our immediate save
+    while (savingRef.current) {
+      await new Promise(r => setTimeout(r, 50));
     }
     savingRef.current = true;
     await doSave(strokes);

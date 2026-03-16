@@ -1,12 +1,22 @@
-import { Stroke, BackgroundPattern, Page } from '@/app/types';
+import { Stroke, BackgroundPattern, Page, ImageStroke } from '@/app/types';
 import { drawBackground } from './drawGrid';
 import { renderAllStrokes } from './renderStroke';
+import { preloadImages } from './imageCache';
+
+function getImageAssetIds(strokes: Stroke[]): string[] {
+  return strokes
+    .filter((s): s is ImageStroke => s.type === 'image')
+    .map(s => s.assetId);
+}
 
 export async function exportPageAsPng(
   strokes: Stroke[],
   backgroundPattern: BackgroundPattern,
   backgroundColor: string
 ): Promise<Blob> {
+  // Ensure all images are loaded before rendering
+  await preloadImages(getImageAssetIds(strokes));
+
   const width = window.innerWidth;
   const height = window.innerHeight;
   const dpr = window.devicePixelRatio || 1;
@@ -41,6 +51,10 @@ export async function exportAllPagesAsPdf(
     unit: 'px',
     format: [width, height],
   });
+
+  // Preload all images across all pages
+  const allAssetIds = pages.flatMap(p => getImageAssetIds(p.strokes));
+  await preloadImages(allAssetIds);
 
   for (let i = 0; i < pages.length; i++) {
     if (i > 0) pdf.addPage([width, height], width > height ? 'landscape' : 'portrait');

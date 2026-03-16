@@ -1,6 +1,7 @@
 'use client';
 
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import { Stroke, BackgroundPattern } from '@/app/types';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { renderAllStrokes } from '@/app/utils/renderStroke';
@@ -30,7 +31,8 @@ export default function PageNav({
   backgroundColor,
 }: PageNavProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [thumbW, setThumbW] = useState(Math.round(THUMB_H * 16 / 9));
+  const thumbWRef = useRef(Math.round(THUMB_H * 16 / 9));
+  const renderThumbRef = useRef<() => void>(null);
 
   const renderThumb = useCallback(() => {
     const canvas = canvasRef.current;
@@ -41,7 +43,7 @@ export default function PageNav({
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const tw = Math.round(THUMB_H * (vw / vh));
-    if (tw !== thumbW) setThumbW(tw);
+    thumbWRef.current = tw;
 
     canvas.width = tw;
     canvas.height = THUMB_H;
@@ -50,9 +52,10 @@ export default function PageNav({
     ctx.save();
     ctx.scale(tw / vw, THUMB_H / vh);
     drawBackground(ctx, vw, vh, backgroundPattern, backgroundColor);
-    renderAllStrokes(ctx, strokes, () => renderThumb());
+    renderAllStrokes(ctx, strokes, () => renderThumbRef.current?.());
     ctx.restore();
-  }, [strokes, backgroundPattern, backgroundColor, thumbW]);
+  }, [strokes, backgroundPattern, backgroundColor]);
+  useEffect(() => { renderThumbRef.current = renderThumb; }, [renderThumb]);
 
   useEffect(() => {
     renderThumb();
@@ -66,13 +69,13 @@ export default function PageNav({
 
   return (
     <div className="fixed bottom-2 right-2 z-50 bg-neutral-900/85 backdrop-blur-md rounded-xl px-3 py-1.5 flex items-center gap-2 shadow-xl">
-      <a
+      <Link
         href="/"
         className="text-neutral-400 no-underline text-base px-2 py-1 rounded-md transition-colors hover:bg-white/10 hover:text-white"
         title="Back to sessions"
       >
         &#x2190;
-      </a>
+      </Link>
       <span
         className="text-neutral-500 text-sm max-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap select-none"
         title={sessionName}
@@ -85,7 +88,7 @@ export default function PageNav({
       {/* Mini preview */}
       <canvas
         ref={canvasRef}
-        width={thumbW}
+        width={Math.round(THUMB_H * 16 / 9)}
         height={THUMB_H}
         className="rounded border border-neutral-700/50 flex-shrink-0"
         title="Page preview"

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { Stroke, ToolType, StrokeStyle, Command, Page, BackgroundPattern, ImageStroke } from '@/app/types';
 import Canvas from '@/app/components/Canvas/Canvas';
 import Toolbar from '@/app/components/Toolbar/Toolbar';
@@ -10,10 +10,18 @@ import { v4 as uuidv4 } from 'uuid';
 import { exportPageAsPng, exportAllPagesAsPdf, downloadBlob } from '@/app/utils/exportPage';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { renderAllStrokes } from '@/app/utils/renderStroke';
+import Image from 'next/image';
+
+async function loadPdfDocument(file: File | Blob): Promise<import('pdfjs-dist').PDFDocumentProxy> {
+  const pdfjsLib = await import('pdfjs-dist');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+  const arrayBuffer = file instanceof File ? await file.arrayBuffer() : await file.arrayBuffer();
+  return pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+}
 
 function getImageDimensions(url: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve) => {
-    const img = new Image();
+    const img = new globalThis.Image();
     img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
     img.onerror = () => resolve({ width: 400, height: 300 });
     img.src = url;
@@ -44,7 +52,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [showCheatsheet, setShowCheatsheet] = useState(false);
 
-  const strokes = page?.strokes ?? [];
+  const strokes = useMemo(() => page?.strokes ?? [], [page?.strokes]);
 
   // Undo/redo stacks
   const [undoStack, setUndoStack] = useState<Command[]>([]);
@@ -57,10 +65,11 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   });
 
   const strokesRef = useRef(strokes);
-  strokesRef.current = strokes;
+  useEffect(() => { strokesRef.current = strokes; }, [strokes]);
 
   // Generate and save thumbnail
   const thumbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const generateAndSaveThumbRef = useRef<() => void>(null);
   const generateAndSaveThumb = useCallback(() => {
     try {
       const canvas = document.createElement('canvas');
@@ -76,7 +85,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       drawBackground(ctx, vw, vh, page?.backgroundPattern || 'blank', page?.backgroundColor || '#ffffff');
       renderAllStrokes(ctx, strokesRef.current, () => {
         // An image just finished loading — re-generate thumbnail
-        generateAndSaveThumb();
+        generateAndSaveThumbRef.current?.();
       });
       const dataUrl = canvas.toDataURL('image/png', 0.7);
       fetch(`/api/sessions/${sessionId}`, {
@@ -85,17 +94,18 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         body: JSON.stringify({ thumbnail: dataUrl }),
       }).catch(() => {});
     } catch {}
-  }, [sessionId, page?.backgroundPattern, page?.backgroundColor]);
+  }, [sessionId, page]);
+  useEffect(() => { generateAndSaveThumbRef.current = generateAndSaveThumb; }, [generateAndSaveThumb]);
 
   const saveThumbnail = useCallback(() => {
     if (thumbTimerRef.current) clearTimeout(thumbTimerRef.current);
     thumbTimerRef.current = setTimeout(generateAndSaveThumb, 2000);
   }, [generateAndSaveThumb]);
 
-  // Trigger thumbnail save when strokes change
+  // Trigger thumbnail save when strokes or background change
   useEffect(() => {
     saveThumbnail();
-  }, [strokes, saveThumbnail]);
+  }, [strokes, saveThumbnail, page?.backgroundPattern, page?.backgroundColor]);
 
   const updatePageStrokes = useCallback((pageId: string, updater: (strokes: Stroke[]) => Stroke[]) => {
     setPage(prev => {
@@ -149,6 +159,12 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
             ? { ...p, backgroundPattern: cmd.oldPattern, backgroundColor: cmd.oldColor }
             : p
           );
+          // Persist background change from undo
+          fetch('/api/pages', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pageId: cmd.pageId, backgroundPattern: cmd.oldPattern, backgroundColor: cmd.oldColor }),
+          }).catch(() => {});
           break;
         case 'transformImageStroke':
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.oldStroke : st));
@@ -183,6 +199,12 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
             ? { ...p, backgroundPattern: cmd.newPattern, backgroundColor: cmd.newColor }
             : p
           );
+          // Persist background change from redo
+          fetch('/api/pages', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pageId: cmd.pageId, backgroundPattern: cmd.newPattern, backgroundColor: cmd.newColor }),
+          }).catch(() => {});
           break;
         case 'transformImageStroke':
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.newStroke : st));
@@ -254,7 +276,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   // Refs for callbacks used in keyboard handler (defined later in the file)
   const handleExportPngRef = useRef<() => void>(() => {});
   const handleExportPdfRef = useRef<() => void>(() => {});
-  const handleImportPdfRef = useRef<() => void>(() => {});
+  const handleImportFileRef = useRef<() => void>(() => {});
+
+  // PDF page selection dialog state
+  const [pdfPageDialog, setPdfPageDialog] = useState<{ pdf: import('pdfjs-dist').PDFDocumentProxy; numPages: number } | null>(null);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -287,7 +312,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         handleExportPdfRef.current();
       } else if (isCmd && e.shiftKey && e.key.toLowerCase() === 'i') {
         e.preventDefault();
-        handleImportPdfRef.current();
+        handleImportFileRef.current();
       } else if (e.key === 'Escape') {
         e.preventDefault();
         setShowCheatsheet(v => {
@@ -394,55 +419,66 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     return () => document.removeEventListener('paste', handlePaste);
   }, [uploadAndCreateImageStroke, handleStrokeComplete]);
 
-  // PDF import handler
-  const handleImportPdf = useCallback(async () => {
+  // Import selected PDF pages as image strokes
+  const importPdfPages = useCallback(async (pdf: import('pdfjs-dist').PDFDocumentProxy, pageNumbers: number[]) => {
+    for (let idx = 0; idx < pageNumbers.length; idx++) {
+      const pageNum = pageNumbers[idx];
+      const pdfPage = await pdf.getPage(pageNum);
+      const viewport = pdfPage.getViewport({ scale: 2 });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d')!;
+
+      await pdfPage.render({ canvasContext: ctx, viewport, canvas } as never).promise;
+
+      const blob = await new Promise<Blob>((resolve) =>
+        canvas.toBlob(b => resolve(b!), 'image/png')
+      );
+
+      const stroke = await uploadAndCreateImageStroke(blob, 'image/png');
+      if (stroke) {
+        if (idx > 0) {
+          stroke.y = stroke.y + idx * (stroke.height + 20);
+        }
+        handleStrokeComplete(stroke);
+      }
+    }
+  }, [uploadAndCreateImageStroke, handleStrokeComplete]);
+
+  // File import handler (images + PDFs)
+  const handleImportFile = useCallback(async () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.pdf,application/pdf';
+    input.accept = 'image/*,.pdf,application/pdf';
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
 
-      try {
-        const pdfjsLib = await import('pdfjs-dist');
-        // Use local worker from node_modules
-        pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+      if (file.type.startsWith('image/')) {
+        const stroke = await uploadAndCreateImageStroke(file);
+        if (stroke) handleStrokeComplete(stroke);
+        return;
+      }
 
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+        try {
+          const pdf = await loadPdfDocument(file);
 
-        // Import all pages as images on the single canvas
-        for (let i = 0; i < pdf.numPages; i++) {
-          const pdfPage = await pdf.getPage(i + 1);
-          const viewport = pdfPage.getViewport({ scale: 2 });
-
-          const canvas = document.createElement('canvas');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          const ctx = canvas.getContext('2d')!;
-
-          await pdfPage.render({ canvasContext: ctx, viewport, canvas } as never).promise;
-
-          const blob = await new Promise<Blob>((resolve) =>
-            canvas.toBlob(b => resolve(b!), 'image/png')
-          );
-
-          const stroke = await uploadAndCreateImageStroke(blob, 'image/png');
-          if (stroke) {
-            // Offset each subsequent page image downward
-            if (i > 0) {
-              stroke.y = stroke.y + i * (stroke.height + 20);
-            }
-            handleStrokeComplete(stroke);
+          if (pdf.numPages === 1) {
+            await importPdfPages(pdf, [1]);
+          } else {
+            setPdfPageDialog({ pdf, numPages: pdf.numPages });
           }
+        } catch (e) {
+          console.error('Failed to import PDF:', e);
+          alert('Failed to import PDF. Please try again.');
         }
-      } catch (e) {
-        console.error('Failed to import PDF:', e);
-        alert('Failed to import PDF. Please try again.');
       }
     };
     input.click();
-  }, [uploadAndCreateImageStroke, handleStrokeComplete]);
+  }, [uploadAndCreateImageStroke, handleStrokeComplete, importPdfPages]);
 
   // Drag and drop handler
   useEffect(() => {
@@ -462,28 +498,12 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
           if (stroke) handleStrokeComplete(stroke);
         } else if (file.type === 'application/pdf') {
           try {
-            const pdfjsLib = await import('pdfjs-dist');
-            const workerUrl = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url);
-            pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl.toString();
-            const arrayBuffer = await file.arrayBuffer();
-            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            const pdf = await loadPdfDocument(file);
 
-            for (let i = 0; i < pdf.numPages; i++) {
-              const pdfPage = await pdf.getPage(i + 1);
-              const viewport = pdfPage.getViewport({ scale: 2 });
-              const canvas = document.createElement('canvas');
-              canvas.width = viewport.width;
-              canvas.height = viewport.height;
-              const ctx = canvas.getContext('2d')!;
-              await pdfPage.render({ canvasContext: ctx, viewport, canvas } as never).promise;
-              const blob = await new Promise<Blob>((resolve) =>
-                canvas.toBlob(b => resolve(b!), 'image/png')
-              );
-              const stroke = await uploadAndCreateImageStroke(blob, 'image/png');
-              if (stroke) {
-                if (i > 0) stroke.y = stroke.y + i * (stroke.height + 20);
-                handleStrokeComplete(stroke);
-              }
+            if (pdf.numPages === 1) {
+              await importPdfPages(pdf, [1]);
+            } else {
+              setPdfPageDialog({ pdf, numPages: pdf.numPages });
             }
           } catch (err) {
             console.error('PDF drop import failed:', err);
@@ -498,7 +518,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       document.removeEventListener('dragover', handleDragOver);
       document.removeEventListener('drop', handleDrop);
     };
-  }, [uploadAndCreateImageStroke, handleStrokeComplete]);
+  }, [uploadAndCreateImageStroke, handleStrokeComplete, importPdfPages]);
 
   const handleExportPng = useCallback(async () => {
     if (!page) return;
@@ -511,9 +531,9 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   }, [page, sessionName]);
 
   // Keep refs in sync for keyboard handler
-  handleExportPngRef.current = handleExportPng;
-  handleExportPdfRef.current = handleExportPdf;
-  handleImportPdfRef.current = handleImportPdf;
+  useEffect(() => { handleExportPngRef.current = handleExportPng; }, [handleExportPng]);
+  useEffect(() => { handleExportPdfRef.current = handleExportPdf; }, [handleExportPdf]);
+  useEffect(() => { handleImportFileRef.current = handleImportFile; }, [handleImportFile]);
 
   const handleImageTransform = useCallback((strokeId: string, newStroke: ImageStroke) => {
     const pageId = page?.id;
@@ -564,7 +584,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         onUndo={undo}
         onRedo={redo}
         onClear={clearCanvas}
-        onImportPdf={handleImportPdf}
+        onImportFile={handleImportFile}
         onExportPng={handleExportPng}
         onExportPdf={handleExportPdf}
         onShowCheatsheet={() => setShowCheatsheet(true)}
@@ -581,6 +601,17 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         backgroundPattern={page.backgroundPattern}
         backgroundColor={page.backgroundColor}
       />
+      {pdfPageDialog && (
+        <PdfPageDialog
+          pdf={pdfPageDialog.pdf}
+          numPages={pdfPageDialog.numPages}
+          onConfirm={async (pages) => {
+            await importPdfPages(pdfPageDialog.pdf, pages);
+            setPdfPageDialog(null);
+          }}
+          onCancel={() => setPdfPageDialog(null)}
+        />
+      )}
       {showCheatsheet && <Cheatsheet onClose={() => setShowCheatsheet(false)} />}
     </>
   );
@@ -674,7 +705,7 @@ function Cheatsheet({ onClose }: { onClose: () => void }) {
           {/* Import / Export */}
           <div>
             <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Import / Export</div>
-            <ShortcutRow keys={[MOD, SHIFT, 'I']} label="Import PDF" />
+            <ShortcutRow keys={[MOD, SHIFT, 'I']} label="Import file" />
             <ShortcutRow keys={[MOD, SHIFT, 'E']} label="Export as PNG" />
             <ShortcutRow keys={[MOD, SHIFT, 'S']} label="Export as PDF" />
           </div>
@@ -684,6 +715,135 @@ function Cheatsheet({ onClose }: { onClose: () => void }) {
             <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Help</div>
             <ShortcutRow keys={['?']} label="Toggle this cheatsheet" />
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PdfPageDialog({ pdf, numPages, onConfirm, onCancel }: {
+  pdf: import('pdfjs-dist').PDFDocumentProxy;
+  numPages: number;
+  onConfirm: (pages: number[]) => void;
+  onCancel: () => void;
+}) {
+  const [selected, setSelected] = useState<Set<number>>(() => new Set(Array.from({ length: numPages }, (_, i) => i + 1)));
+  const [thumbnails, setThumbnails] = useState<Map<number, string>>(new Map());
+
+  // Render page thumbnails on mount
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      for (let i = 1; i <= numPages; i++) {
+        if (cancelled) break;
+        try {
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale: 0.5 });
+          const canvas = document.createElement('canvas');
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const ctx = canvas.getContext('2d')!;
+          await page.render({ canvasContext: ctx, viewport, canvas } as never).promise;
+          if (!cancelled) {
+            setThumbnails(prev => new Map(prev).set(i, canvas.toDataURL('image/png', 0.6)));
+          }
+        } catch {
+          // skip failed page
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pdf, numPages]);
+
+  const toggle = (pageNum: number) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(pageNum)) next.delete(pageNum);
+      else next.add(pageNum);
+      return next;
+    });
+  };
+
+  const allSelected = selected.size === numPages;
+  const toggleAll = () => {
+    if (allSelected) setSelected(new Set());
+    else setSelected(new Set(Array.from({ length: numPages }, (_, i) => i + 1)));
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center" onClick={onCancel}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+      <div
+        className="relative bg-neutral-900/95 border border-neutral-700/50 rounded-2xl shadow-2xl p-5 max-w-xl w-full mx-4 animate-slide-up"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-white text-lg font-semibold m-0">Import PDF</h2>
+            <p className="text-neutral-400 text-sm mt-0.5 mb-0">
+              {numPages} pages — {selected.size} selected
+            </p>
+          </div>
+          <button
+            onClick={toggleAll}
+            className="text-sm text-blue-400 hover:text-blue-300 bg-transparent border-none cursor-pointer transition-colors"
+          >
+            {allSelected ? 'Deselect all' : 'Select all'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-4 sm:grid-cols-5 gap-3 max-h-[50vh] overflow-y-auto p-1 -m-1">
+          {Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => {
+            const isSelected = selected.has(pageNum);
+            const thumb = thumbnails.get(pageNum);
+            return (
+              <button
+                key={pageNum}
+                onClick={() => toggle(pageNum)}
+                className={`relative flex flex-col items-center gap-1 p-1.5 rounded-lg cursor-pointer transition-all border-2 bg-transparent
+                  ${isSelected
+                    ? 'border-blue-500 bg-blue-500/10'
+                    : 'border-transparent hover:border-neutral-600 hover:bg-white/5'}`}
+              >
+                <div className="relative w-full aspect-[3/4] rounded bg-neutral-800 overflow-hidden flex items-center justify-center">
+                  {thumb ? (
+                    <Image src={thumb} alt={`Page ${pageNum}`} className="w-full h-full object-contain" draggable={false} fill unoptimized />
+                  ) : (
+                    <div className="w-6 h-6 rounded-full border-2 border-neutral-600 border-t-neutral-400 animate-spin" />
+                  )}
+                  {isSelected && (
+                    <div className="absolute top-1 right-1 w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center shadow-md">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    </div>
+                  )}
+                </div>
+                <span className={`text-xs tabular-nums ${isSelected ? 'text-blue-400' : 'text-neutral-500'}`}>
+                  {pageNum}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex justify-end gap-2 mt-4">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 rounded-lg text-sm text-neutral-300 bg-transparent border border-neutral-600 cursor-pointer hover:bg-white/10 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              const pages = Array.from(selected).sort((a, b) => a - b);
+              if (pages.length > 0) onConfirm(pages);
+            }}
+            disabled={selected.size === 0}
+            className="px-4 py-2 rounded-lg text-sm text-white bg-blue-600 border-none cursor-pointer hover:bg-blue-500 transition-colors disabled:opacity-40 disabled:cursor-default"
+          >
+            Import {selected.size > 0 ? `(${selected.size})` : ''}
+          </button>
         </div>
       </div>
     </div>

@@ -38,9 +38,19 @@ export async function PUT(request: Request) {
   const { pageId, backgroundPattern, backgroundColor } = await request.json();
   const db = getDb();
 
-  db.prepare(
-    'UPDATE pages SET background_pattern = ?, background_color = ? WHERE id = ?'
-  ).run(backgroundPattern, backgroundColor, pageId);
+  const transaction = db.transaction(() => {
+    db.prepare(
+      'UPDATE pages SET background_pattern = ?, background_color = ? WHERE id = ?'
+    ).run(backgroundPattern, backgroundColor, pageId);
+
+    // Update session timestamp so sort order reflects this change
+    const page = db.prepare('SELECT session_id FROM pages WHERE id = ?').get(pageId) as { session_id: string } | undefined;
+    if (page) {
+      const now = new Date().toISOString();
+      db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, page.session_id);
+    }
+  });
+  transaction();
 
   return NextResponse.json({ ok: true });
 }
@@ -50,6 +60,13 @@ export async function DELETE(request: Request) {
   const { pageId, sessionId } = await request.json();
   const db = getDb();
   const now = new Date().toISOString();
+
+  // Collect asset IDs referenced by this page's strokes before cascade delete
+  const assetIds = (db.prepare(
+    "SELECT json_extract(data, '$.assetId') as assetId FROM strokes WHERE page_id = ? AND type = 'image'"
+  ).all(pageId) as Array<{ assetId: string | null }>)
+    .map(r => r.assetId)
+    .filter((aid): aid is string => aid !== null);
 
   const transaction = db.transaction(() => {
     const page = db.prepare('SELECT position FROM pages WHERE id = ?').get(pageId) as { position: number } | undefined;
@@ -62,6 +79,12 @@ export async function DELETE(request: Request) {
     db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
   });
   transaction();
+
+  // Clean up orphaned assets
+  if (assetIds.length > 0) {
+    const { cleanupOrphanedAssets } = await import('@/app/lib/assetCleanup');
+    cleanupOrphanedAssets(assetIds);
+  }
 
   return NextResponse.json({ ok: true });
 }

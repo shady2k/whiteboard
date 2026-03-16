@@ -116,8 +116,15 @@ export function drawMarkerStroke(
   if (w <= 0 || h <= 0) return;
 
   // Draw opaque on offscreen canvas, then composite with alpha
-  const offscreen = new OffscreenCanvas(w, h);
-  const octx = offscreen.getContext('2d')!;
+  let offscreen: OffscreenCanvas | HTMLCanvasElement;
+  if (typeof OffscreenCanvas !== 'undefined') {
+    offscreen = new OffscreenCanvas(w, h);
+  } else {
+    offscreen = document.createElement('canvas');
+    offscreen.width = w;
+    offscreen.height = h;
+  }
+  const octx = offscreen.getContext('2d')! as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   octx.translate(-minX, -minY);
   fillOutline(octx, outline, style.color);
 

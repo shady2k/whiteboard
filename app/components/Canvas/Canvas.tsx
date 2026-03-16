@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { Point, Stroke, FreehandStroke, MarkerStroke, ImageStroke, StrokeStyle, ToolType, BackgroundPattern } from '@/app/types';
 import { drawFreehandPoints, drawMarkerPoints } from '@/app/utils/drawStroke';
 import { renderStroke, renderAllStrokes } from '@/app/utils/renderStroke';
@@ -86,19 +86,19 @@ export default function Canvas({
   const onPanChangeRef = useRef(onPanChange);
   const panOffsetRef = useRef(panOffset);
 
-  activeToolRef.current = activeTool;
-  strokeStyleRef.current = strokeStyle;
-  strokesRef.current = strokes;
-  bgPatternRef.current = backgroundPattern;
-  bgColorRef.current = backgroundColor;
-  scaleRef.current = scale;
-  onStrokeCompleteRef.current = onStrokeComplete;
-  onStrokeDeleteRef.current = onStrokeDelete;
-  onImageTransformRef.current = onImageTransform;
-  onToolChangeRef.current = onToolChange;
-  onZoomChangeRef.current = onZoomChange;
-  onPanChangeRef.current = onPanChange;
-  panOffsetRef.current = panOffset;
+  useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
+  useEffect(() => { strokeStyleRef.current = strokeStyle; }, [strokeStyle]);
+  useEffect(() => { strokesRef.current = strokes; }, [strokes]);
+  useEffect(() => { bgPatternRef.current = backgroundPattern; }, [backgroundPattern]);
+  useEffect(() => { bgColorRef.current = backgroundColor; }, [backgroundColor]);
+  useEffect(() => { scaleRef.current = scale; }, [scale]);
+  useEffect(() => { onStrokeCompleteRef.current = onStrokeComplete; }, [onStrokeComplete]);
+  useEffect(() => { onStrokeDeleteRef.current = onStrokeDelete; }, [onStrokeDelete]);
+  useEffect(() => { onImageTransformRef.current = onImageTransform; }, [onImageTransform]);
+  useEffect(() => { onToolChangeRef.current = onToolChange; }, [onToolChange]);
+  useEffect(() => { onZoomChangeRef.current = onZoomChange; }, [onZoomChange]);
+  useEffect(() => { onPanChangeRef.current = onPanChange; }, [onPanChange]);
+  useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
 
   const getCtx = useCallback((canvas: HTMLCanvasElement | null): CanvasRenderingContext2D | null => {
     return canvas?.getContext('2d') ?? null;
@@ -154,6 +154,7 @@ export default function Canvas({
     ctx.restore();
   }, [getCtx, getViewportSize, getTransform]);
 
+  const redrawInkRef = useRef<() => void>(null);
   const redrawInk = useCallback(() => {
     const ctx = getCtx(inkCanvasRef.current);
     if (!ctx) return;
@@ -163,10 +164,10 @@ export default function Canvas({
     ctx.save();
     ctx.translate(panX, panY);
     ctx.scale(s, s);
-    const triggerRedraw = () => redrawInk();
-    renderAllStrokes(ctx, strokesRef.current, triggerRedraw, draggingImageIdRef.current ?? undefined);
+    renderAllStrokes(ctx, strokesRef.current, () => redrawInkRef.current?.(), draggingImageIdRef.current ?? undefined);
     ctx.restore();
   }, [getCtx, getViewportSize, getTransform]);
+  useEffect(() => { redrawInkRef.current = redrawInk; }, [redrawInk]);
 
   const clearPreview = useCallback(() => {
     const ctx = getCtx(previewCanvasRef.current);
@@ -232,8 +233,8 @@ export default function Canvas({
 
   useEffect(() => { redrawInk(); }, [strokes, redrawInk]);
   useEffect(() => { redrawBackground(); }, [backgroundColor, backgroundPattern, redrawBackground]);
-  useEffect(() => { redrawBackground(); redrawInk(); }, [scale]);
-  useEffect(() => { redrawBackground(); redrawInk(); }, [panOffset]);
+  useEffect(() => { redrawBackground(); redrawInk(); }, [scale, redrawBackground, redrawInk]);
+  useEffect(() => { redrawBackground(); redrawInk(); }, [panOffset, redrawBackground, redrawInk]);
 
   // Track shift and space keys
   useEffect(() => {
@@ -270,14 +271,40 @@ export default function Canvas({
     return () => document.removeEventListener('wheel', handleWheel);
   }, []);
 
+  // Delete selected image with Delete/Backspace key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedImageRef.current) {
+        e.preventDefault();
+        if (onStrokeDeleteRef.current) {
+          onStrokeDeleteRef.current(selectedImageRef.current.id);
+        }
+        selectedImageRef.current = null;
+        queueMicrotask(() => setSelectedImage(null));
+        clearPreview();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [clearPreview]);
+
   // Deselect image when tool changes away from hand
   useEffect(() => {
     if (activeTool !== 'hand') {
       selectedImageRef.current = null;
-      setSelectedImage(null);
+      queueMicrotask(() => setSelectedImage(null));
       clearPreview();
     }
   }, [activeTool, clearPreview]);
+
+  // Clear selection when selected image is removed from strokes (e.g. undo)
+  useEffect(() => {
+    if (selectedImage && !strokes.find(s => s.id === selectedImage.id)) {
+      selectedImageRef.current = null;
+      queueMicrotask(() => setSelectedImage(null));
+      clearPreview();
+    }
+  }, [strokes, selectedImage, clearPreview]);
 
   const getPoint = useCallback((e: PointerEvent): Point => {
     const canvas = previewCanvasRef.current!;
@@ -363,6 +390,10 @@ export default function Canvas({
     return null;
   }, []);
 
+  // Lock proportions ref for use in pointer handler
+  const lockProportionsRef = useRef(lockProportions);
+  useEffect(() => { lockProportionsRef.current = lockProportions; }, [lockProportions]);
+
   // Pointer events
   useEffect(() => {
     const canvas = previewCanvasRef.current;
@@ -378,9 +409,9 @@ export default function Canvas({
         (e.buttons === 32);
       let tool = activeToolRef.current;
 
+      // Temporarily override to eraser for this stroke only (don't change toolbar state)
       if (isBarrelButton || isEraserEnd) {
         tool = 'eraser';
-        if (onToolChangeRef.current) onToolChangeRef.current('eraser');
       }
 
       // Space+drag or middle-mouse = temporary pan
@@ -414,6 +445,7 @@ export default function Canvas({
           setSelectedImage(null);
           setIsDragging(false);
           draggingImageIdRef.current = null;
+          clearPreview();
           // Start panning
           isPanningRef.current = true;
           panStartRef.current = { x: e.clientX, y: e.clientY };
@@ -743,9 +775,6 @@ export default function Canvas({
     };
   }, [getPoint, getCtx, getViewportSize, getTransform, clearPreview, findStrokeAtPoint, findImageAtPoint, drawImageSelection, redrawBackground, redrawInk]);
 
-  // Lock proportions ref for use in pointer handler
-  const lockProportionsRef = useRef(lockProportions);
-  lockProportionsRef.current = lockProportions;
 
   // Handle opacity change for selected image
   const handleOpacityChange = useCallback((opacity: number) => {
@@ -772,16 +801,17 @@ export default function Canvas({
     clearPreview();
   }, [selectedImage, clearPreview]);
 
-  // Compute screen position for floating controls
-  const getSelectionScreenPos = useCallback(() => {
+  // Compute screen position for floating controls using props directly (not refs)
+  const selPos = useMemo(() => {
     if (!selectedImage) return null;
-    const { panX, panY, scale: s } = getTransform();
-    const screenX = selectedImage.x * s + panX;
-    const screenY = (selectedImage.y + selectedImage.height) * s + panY + 8;
+    const w = typeof window !== 'undefined' ? window.innerWidth : 0;
+    const h = typeof window !== 'undefined' ? window.innerHeight : 0;
+    const panX = (w / 2) * (1 - scale) + panOffset.x;
+    const panY = (h / 2) * (1 - scale) + panOffset.y;
+    const screenX = selectedImage.x * scale + panX;
+    const screenY = (selectedImage.y + selectedImage.height) * scale + panY + 8;
     return { x: screenX, y: screenY };
-  }, [selectedImage, getTransform]);
-
-  const selPos = getSelectionScreenPos();
+  }, [selectedImage, scale, panOffset]);
 
   const cursorClass = activeTool === 'hand' ? 'cursor-grab' : 'cursor-crosshair';
 

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import Image from 'next/image';
 
 interface SessionSummary {
   id: string;
@@ -180,11 +181,13 @@ export default function SessionList() {
                     style={{ backgroundColor: session.bg_color || '#ffffff' }}
                   >
                     {session.thumbnail ? (
-                      <img
+                      <Image
                         src={session.thumbnail}
                         alt=""
                         className="w-full h-full object-contain"
                         draggable={false}
+                        fill
+                        unoptimized
                       />
                     ) : (
                       <PreviewPattern pattern={session.bg_pattern} bgColor={session.bg_color || '#ffffff'} />

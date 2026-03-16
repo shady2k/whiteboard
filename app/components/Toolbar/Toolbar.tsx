@@ -17,7 +17,7 @@ interface ToolbarProps {
   onUndo: () => void;
   onRedo: () => void;
   onClear: () => void;
-  onImportPdf: () => void;
+  onImportFile: () => void;
   onExportPng: () => void;
   onExportPdf: () => void;
   onShowCheatsheet: () => void;
@@ -60,7 +60,7 @@ export default function Toolbar({
   onUndo,
   onRedo,
   onClear,
-  onImportPdf,
+  onImportFile,
   onExportPng,
   onExportPdf,
   onShowCheatsheet,
@@ -90,12 +90,15 @@ export default function Toolbar({
 
   // Auto-expand shapes flyout when switching to a shape tool (e.g. via keyboard)
   useEffect(() => {
-    if (SHAPE_TOOLS.includes(activeTool) && !SHAPE_TOOLS.includes(prevToolRef.current)) {
-      setShapesOpen(true);
-      setColorsOpen(false);
-      setMoreOpen(false);
-    }
+    const prev = prevToolRef.current;
     prevToolRef.current = activeTool;
+    if (SHAPE_TOOLS.includes(activeTool) && !SHAPE_TOOLS.includes(prev)) {
+      queueMicrotask(() => {
+        setShapesOpen(true);
+        setColorsOpen(false);
+        setMoreOpen(false);
+      });
+    }
   }, [activeTool]);
 
   const closeAllMenus = () => { setShapesOpen(false); setColorsOpen(false); setMoreOpen(false); };
@@ -235,6 +238,11 @@ export default function Toolbar({
 
       <Divider />
 
+      {/* Import file */}
+      <ToolBtn active={false} onClick={onImportFile} title="Import file (Ctrl+Shift+I)">
+        <PaperclipIcon />
+      </ToolBtn>
+
       {/* === MORE MENU === */}
       <div className="relative" ref={moreRef}>
         <ToolBtn active={false} onClick={() => { setMoreOpen(!moreOpen); setShapesOpen(false); setColorsOpen(false); }} title="More options">
@@ -276,9 +284,8 @@ export default function Toolbar({
 
             {/* Import / Export */}
             <div className="flex flex-col gap-0.5">
-              <MenuBtn onClick={() => { onImportPdf(); setMoreOpen(false); }} icon={<ImportIcon />} label="Import PDF" />
               <MenuBtn onClick={() => { onExportPng(); setMoreOpen(false); }} icon={<ImageExportIcon />} label="Export page as PNG" />
-              <MenuBtn onClick={() => { onExportPdf(); setMoreOpen(false); }} icon={<FileExportIcon />} label="Export all as PDF" />
+              <MenuBtn onClick={() => { onExportPdf(); setMoreOpen(false); }} icon={<FileExportIcon />} label="Export as PDF" />
             </div>
 
             <div className="w-full h-px bg-white/10" />
@@ -413,8 +420,8 @@ function KeyboardIcon() {
 function FileExportIcon() {
   return (<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><polyline points="12 18 12 12" /><polyline points="9 15 12 12 15 15" /></svg>);
 }
-function ImportIcon() {
-  return (<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>);
+function PaperclipIcon() {
+  return (<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>);
 }
 function ImageExportIcon() {
   return (<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>);

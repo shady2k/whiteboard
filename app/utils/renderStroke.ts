@@ -60,13 +60,9 @@ export function renderAllStrokes(
   onImageLoad?: () => void,
   skipStrokeId?: string
 ): void {
-  // Render images first (background), then drawings on top
+  // Render strokes in their natural z-order (array order matches DB z_order)
   for (const stroke of strokes) {
     if (skipStrokeId && stroke.id === skipStrokeId) continue;
-    if (stroke.type === 'image') renderStroke(ctx, stroke, onImageLoad);
-  }
-  for (const stroke of strokes) {
-    if (skipStrokeId && stroke.id === skipStrokeId) continue;
-    if (stroke.type !== 'image') renderStroke(ctx, stroke, onImageLoad);
+    renderStroke(ctx, stroke, onImageLoad);
   }
 }

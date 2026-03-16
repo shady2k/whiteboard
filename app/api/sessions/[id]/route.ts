@@ -31,6 +31,7 @@ export async function GET(
       strokes: strokes.map(s => ({
         ...JSON.parse(s.data as string),
         id: s.id,
+        type: s.type,
       })),
     };
   });
@@ -65,7 +66,25 @@ export async function DELETE(
   const { id } = await params;
   const db = getDb();
 
+  // Collect asset IDs referenced by this session's strokes
+  const assetIds = (db.prepare(`
+    SELECT DISTINCT json_extract(s.data, '$.assetId') as assetId
+    FROM strokes s
+    INNER JOIN pages p ON s.page_id = p.id
+    WHERE p.session_id = ? AND s.type = 'image'
+  `).all(id) as Array<{ assetId: string | null }>)
+    .map(r => r.assetId)
+    .filter((aid): aid is string => aid !== null);
+
+  // Delete session (cascades to pages and strokes)
   db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+
+  // Clean up assets that are no longer referenced by any remaining stroke
+  if (assetIds.length > 0) {
+    const { cleanupOrphanedAssets } = await import('@/app/lib/assetCleanup');
+    cleanupOrphanedAssets(assetIds);
+  }
+
   return NextResponse.json({ ok: true });
 }
 
@@ -118,16 +137,18 @@ export async function POST(
             const newAssetId = uuidv4();
             const oldPath = asset.file_path as string;
             const ext = path.extname(oldPath);
-            const newPath = path.join(DATA_DIR, 'assets', `${newAssetId}${ext}`);
+            const newFileName = `${newAssetId}${ext}`;
+            const srcPath = path.join(DATA_DIR, 'assets', path.basename(oldPath));
+            const destPath = path.join(DATA_DIR, 'assets', newFileName);
             try {
-              fs.copyFileSync(path.join(DATA_DIR, 'assets', path.basename(oldPath)), newPath);
+              fs.copyFileSync(srcPath, destPath);
+              db.prepare(
+                'INSERT INTO assets (id, mime_type, file_path, size, created_at) VALUES (?, ?, ?, ?, ?)'
+              ).run(newAssetId, asset.mime_type, newFileName, asset.size, now);
+              strokeData.assetId = newAssetId;
             } catch {
-              // If copy fails, reuse old asset
+              // If copy fails, reuse the original asset reference
             }
-            db.prepare(
-              'INSERT INTO assets (id, mime_type, file_path, size, created_at) VALUES (?, ?, ?, ?, ?)'
-            ).run(newAssetId, asset.mime_type, newPath, asset.size, now);
-            strokeData.assetId = newAssetId;
           }
         }
 

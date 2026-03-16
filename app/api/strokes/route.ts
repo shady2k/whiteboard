@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import getDb from '@/app/lib/db';
+import { cleanupOrphanedAssets } from '@/app/lib/assetCleanup';
 
 // POST /api/strokes — save strokes (batch upsert)
 export async function POST(request: Request) {
@@ -32,6 +33,13 @@ export async function PUT(request: Request) {
   const db = getDb();
   const now = new Date().toISOString();
 
+  // Collect asset IDs referenced by old strokes before deleting
+  const oldAssetIds = (db.prepare(
+    "SELECT json_extract(data, '$.assetId') as assetId FROM strokes WHERE page_id = ? AND type = 'image'"
+  ).all(pageId) as Array<{ assetId: string | null }>)
+    .map(r => r.assetId)
+    .filter((id): id is string => id !== null);
+
   const insert = db.prepare(
     'INSERT INTO strokes (id, page_id, type, data, z_order) VALUES (?, ?, ?, ?, ?)'
   );
@@ -47,6 +55,11 @@ export async function PUT(request: Request) {
   });
   transaction();
 
+  // Clean up assets that are no longer referenced by any stroke
+  if (oldAssetIds.length > 0) {
+    cleanupOrphanedAssets(oldAssetIds);
+  }
+
   return NextResponse.json({ ok: true });
 }
 
@@ -56,8 +69,22 @@ export async function DELETE(request: Request) {
   const db = getDb();
   const now = new Date().toISOString();
 
+  // Check if this stroke references an asset before deleting
+  const stroke = db.prepare('SELECT data, type FROM strokes WHERE id = ?').get(strokeId) as { data: string; type: string } | undefined;
+  let assetId: string | null = null;
+  if (stroke?.type === 'image') {
+    try {
+      assetId = JSON.parse(stroke.data).assetId ?? null;
+    } catch { /* ignore */ }
+  }
+
   db.prepare('DELETE FROM strokes WHERE id = ?').run(strokeId);
   db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
+
+  // Clean up the asset if it's no longer referenced
+  if (assetId) {
+    cleanupOrphanedAssets([assetId]);
+  }
 
   return NextResponse.json({ ok: true });
 }

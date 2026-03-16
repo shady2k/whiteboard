@@ -7,12 +7,23 @@ import fs from 'fs';
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const ASSETS_DIR = path.join(DATA_DIR, 'assets');
 
+const ALLOWED_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
+
 // POST /api/assets — upload an asset (image)
 export async function POST(request: Request) {
   const formData = await request.formData();
   const file = formData.get('file') as File;
   if (!file) {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 });
+  }
+
+  if (!ALLOWED_MIME_TYPES.has(file.type)) {
+    return NextResponse.json({ error: 'File type not allowed. Use PNG, JPEG, WebP, or GIF.' }, { status: 400 });
+  }
+
+  if (file.size > MAX_FILE_SIZE) {
+    return NextResponse.json({ error: 'File too large. Maximum 20 MB.' }, { status: 400 });
   }
 
   const assetId = uuidv4();
@@ -58,6 +69,7 @@ export async function GET(request: Request) {
     headers: {
       'Content-Type': asset.mime_type,
       'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
     },
   });
 }
