@@ -24,9 +24,10 @@ interface WhiteboardProps {
   sessionName: string;
 }
 
-export default function Whiteboard({ sessionId, initialPages, sessionName }: WhiteboardProps) {
+export default function Whiteboard({ sessionId, initialPages, sessionName: initialName }: WhiteboardProps) {
   const [pages, setPages] = useState<Page[]>(initialPages);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
+  const [sessionName, setSessionName] = useState(initialName);
   const [activeTool, setActiveTool] = useState<ToolType>('pen');
   const [strokeStyle, setStrokeStyle] = useState<StrokeStyle>({
     color: '#000000',
@@ -478,6 +479,19 @@ export default function Whiteboard({ sessionId, initialPages, sessionName }: Whi
     await exportAllPagesAsPdf(pages, sessionName);
   }, [pages, sessionName]);
 
+  const handleSessionRename = useCallback(async (name: string) => {
+    setSessionName(name);
+    try {
+      await fetch(`/api/sessions/${sessionId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+    } catch (e) {
+      console.error('Failed to rename session:', e);
+    }
+  }, [sessionId]);
+
   const handleImageTransform = useCallback((strokeId: string, newStroke: ImageStroke) => {
     const pageId = currentPage?.id;
     if (!pageId) return;
@@ -529,6 +543,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName }: Whi
         onAddPage={addPage}
         onDeletePage={deletePage}
         sessionName={sessionName}
+        onSessionRename={handleSessionRename}
       />
     </>
   );

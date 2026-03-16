@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import { Page } from '@/app/types';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { renderAllStrokes } from '@/app/utils/renderStroke';
@@ -12,6 +12,7 @@ interface PageNavProps {
   onAddPage: () => void;
   onDeletePage: () => void;
   sessionName: string;
+  onSessionRename?: (name: string) => void;
 }
 
 const THUMB_W = 64;
@@ -24,7 +25,29 @@ export default function PageNav({
   onAddPage,
   onDeletePage,
   sessionName,
+  onSessionRename,
 }: PageNavProps) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(sessionName);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const commitRename = () => {
+    const trimmed = editValue.trim();
+    if (trimmed && trimmed !== sessionName && onSessionRename) {
+      onSessionRename(trimmed);
+    } else {
+      setEditValue(sessionName);
+    }
+    setEditing(false);
+  };
+
   return (
     <div className="fixed bottom-2 left-1/2 -translate-x-1/2 z-50 bg-neutral-900/85 backdrop-blur-md rounded-xl px-3 py-1.5 flex items-center gap-3 shadow-xl">
       <a
@@ -34,9 +57,27 @@ export default function PageNav({
       >
         &#x2190;
       </a>
-      <span className="text-neutral-500 text-sm max-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap">
-        {sessionName}
-      </span>
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="bg-neutral-800 text-white text-sm px-2 py-0.5 rounded border border-blue-500 outline-none w-[140px]"
+          value={editValue}
+          onChange={e => setEditValue(e.target.value)}
+          onBlur={commitRename}
+          onKeyDown={e => {
+            if (e.key === 'Enter') commitRename();
+            if (e.key === 'Escape') { setEditValue(sessionName); setEditing(false); }
+          }}
+        />
+      ) : (
+        <span
+          className="text-neutral-500 text-sm max-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap cursor-pointer hover:text-neutral-300 transition-colors"
+          onClick={() => { setEditValue(sessionName); setEditing(true); }}
+          title="Click to rename session"
+        >
+          {sessionName}
+        </span>
+      )}
 
       {/* Thumbnails */}
       <div className="flex items-center gap-1 max-w-[400px] overflow-x-auto">
