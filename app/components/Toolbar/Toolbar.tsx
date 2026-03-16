@@ -17,6 +17,7 @@ interface ToolbarProps {
   onClear: () => void;
   onImportPdf: () => void;
   onExportPng: () => void;
+  onExportPdf: () => void;
   canUndo: boolean;
   canRedo: boolean;
 }
@@ -61,6 +62,7 @@ export default function Toolbar({
   onClear,
   onImportPdf,
   onExportPng,
+  onExportPdf,
   canUndo,
   canRedo,
 }: ToolbarProps) {
@@ -168,9 +170,16 @@ export default function Toolbar({
         <button
           className="w-10 h-10 rounded-lg flex items-center justify-center text-xs cursor-pointer transition-colors border-none bg-transparent text-neutral-400 hover:bg-white/10 hover:text-white"
           onClick={onExportPng}
-          title="Export as PNG"
+          title="Export page as PNG"
         >
           PNG
+        </button>
+        <button
+          className="w-10 h-10 rounded-lg flex items-center justify-center text-[10px] cursor-pointer transition-colors border-none bg-transparent text-neutral-400 hover:bg-white/10 hover:text-white"
+          onClick={onExportPdf}
+          title="Export all pages as PDF"
+        >
+          &#x2193;PDF
         </button>
       </div>
 

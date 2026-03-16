@@ -7,7 +7,7 @@ import Toolbar from '@/app/components/Toolbar/Toolbar';
 import PageNav from '@/app/components/PageNav/PageNav';
 import { useAutoSave } from '@/app/hooks/useAutoSave';
 import { v4 as uuidv4 } from 'uuid';
-import { exportPageAsPng, downloadBlob } from '@/app/utils/exportPage';
+import { exportPageAsPng, exportAllPagesAsPdf, downloadBlob } from '@/app/utils/exportPage';
 
 function getImageDimensions(url: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve) => {
@@ -104,6 +104,9 @@ export default function Whiteboard({ sessionId, initialPages, sessionName }: Whi
               : pg
           ));
           break;
+        case 'transformImageStroke':
+          updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.oldStroke : st));
+          break;
       }
 
       setRedoStack(r => [...r, cmd]);
@@ -135,6 +138,9 @@ export default function Whiteboard({ sessionId, initialPages, sessionName }: Whi
               ? { ...pg, backgroundPattern: cmd.newPattern, backgroundColor: cmd.newColor }
               : pg
           ));
+          break;
+        case 'transformImageStroke':
+          updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.newStroke : st));
           break;
       }
 
@@ -468,6 +474,20 @@ export default function Whiteboard({ sessionId, initialPages, sessionName }: Whi
     downloadBlob(blob, `${sessionName}-page-${currentPageIndex + 1}.png`);
   }, [currentPage, strokes, sessionName, currentPageIndex]);
 
+  const handleExportPdf = useCallback(async () => {
+    await exportAllPagesAsPdf(pages, sessionName);
+  }, [pages, sessionName]);
+
+  const handleImageTransform = useCallback((strokeId: string, newStroke: ImageStroke) => {
+    const pageId = currentPage?.id;
+    if (!pageId) return;
+    const oldStroke = strokes.find(s => s.id === strokeId) as ImageStroke | undefined;
+    if (!oldStroke) return;
+    pushCommand({ type: 'transformImageStroke', pageId, strokeId, oldStroke, newStroke });
+    updatePageStrokes(pageId, s => s.map(st => st.id === strokeId ? newStroke : st));
+    setTimeout(() => saveStrokes(strokesRef.current), 0);
+  }, [currentPage?.id, strokes, pushCommand, updatePageStrokes, saveStrokes]);
+
   if (!currentPage) return null;
 
   return (
@@ -480,6 +500,8 @@ export default function Whiteboard({ sessionId, initialPages, sessionName }: Whi
         backgroundPattern={currentPage.backgroundPattern}
         onStrokeComplete={handleStrokeComplete}
         onStrokeDelete={handleStrokeDelete}
+        onImageTransform={handleImageTransform}
+        onToolChange={setActiveTool}
       />
       <Toolbar
         activeTool={activeTool}
@@ -496,12 +518,13 @@ export default function Whiteboard({ sessionId, initialPages, sessionName }: Whi
         onClear={clearCanvas}
         onImportPdf={handleImportPdf}
         onExportPng={handleExportPng}
+        onExportPdf={handleExportPdf}
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
       />
       <PageNav
         currentIndex={currentPageIndex}
-        totalPages={pages.length}
+        pages={pages}
         onGoToPage={goToPage}
         onAddPage={addPage}
         onDeletePage={deletePage}
