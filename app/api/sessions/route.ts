@@ -2,11 +2,14 @@ import { NextResponse } from 'next/server';
 import getDb from '@/app/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 
-// GET /api/sessions — list all sessions
+// GET /api/sessions — list all sessions with preview info
 export async function GET() {
   const db = getDb();
   const sessions = db.prepare(`
-    SELECT s.*, COUNT(p.id) as page_count
+    SELECT s.*,
+           COUNT(p.id) as page_count,
+           (SELECT pp.background_color FROM pages pp WHERE pp.session_id = s.id ORDER BY pp.position LIMIT 1) as bg_color,
+           (SELECT pp.background_pattern FROM pages pp WHERE pp.session_id = s.id ORDER BY pp.position LIMIT 1) as bg_pattern
     FROM sessions s
     LEFT JOIN pages p ON p.session_id = s.id
     GROUP BY s.id

@@ -70,15 +70,28 @@ export default function Toolbar({
   const isShapeActive = SHAPE_TOOLS.includes(activeTool);
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
+    const handler = (e: PointerEvent) => {
       if (shapesRef.current && !shapesRef.current.contains(e.target as Node)) setShapesOpen(false);
       if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false);
     };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    document.addEventListener('pointerdown', handler);
+    return () => document.removeEventListener('pointerdown', handler);
   }, []);
 
   return (
+    <>
+    {/* Invisible backdrop to catch clicks when menus are open — prevents canvas from drawing */}
+    {(shapesOpen || moreOpen) && (
+      <div
+        className="fixed inset-0 z-40"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          setShapesOpen(false);
+          setMoreOpen(false);
+        }}
+      />
+    )}
     <div className="fixed top-1/2 left-2 -translate-y-1/2 z-50 bg-neutral-900/85 backdrop-blur-md rounded-xl p-2 flex flex-col gap-1 shadow-xl">
       {/* === QUICK ACCESS === */}
 
@@ -98,7 +111,7 @@ export default function Toolbar({
           active={isShapeActive}
           onClick={() => {
             if (!isShapeActive) { onToolChange(activeShape); }
-            else { setShapesOpen(!shapesOpen); }
+            else { setShapesOpen(!shapesOpen); setMoreOpen(false); }
           }}
           title={shapeLabel(activeShape)}
           badge="&#x25B8;"
@@ -163,11 +176,11 @@ export default function Toolbar({
 
       {/* === MORE MENU === */}
       <div className="relative" ref={moreRef}>
-        <ToolBtn active={false} onClick={() => setMoreOpen(!moreOpen)} title="More options">
+        <ToolBtn active={false} onClick={() => { setMoreOpen(!moreOpen); setShapesOpen(false); }} title="More options">
           <MoreIcon />
         </ToolBtn>
         {moreOpen && (
-          <div className="absolute left-12 bottom-0 bg-neutral-900/95 backdrop-blur-md rounded-xl p-3 shadow-xl border border-neutral-700/50 min-w-[200px] flex flex-col gap-3">
+          <div className="absolute left-12 bottom-0 bg-neutral-900/95 backdrop-blur-md rounded-xl p-3 shadow-xl border border-neutral-700/50 min-w-[200px] flex flex-col gap-3 animate-menu-in">
 
             {/* Background pattern */}
             <div>
@@ -215,6 +228,7 @@ export default function Toolbar({
         )}
       </div>
     </div>
+    </>
   );
 }
 
@@ -239,7 +253,7 @@ function ToolBtn({ active, onClick, title, children, disabled, badge }: {
 
 function Flyout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="absolute left-12 top-0 bg-neutral-900/95 backdrop-blur-md rounded-lg p-1 flex flex-col gap-1 shadow-xl border border-neutral-700/50">
+    <div className="absolute left-12 top-0 bg-neutral-900/95 backdrop-blur-md rounded-lg p-1 flex flex-col gap-1 shadow-xl border border-neutral-700/50 animate-menu-in">
       {children}
     </div>
   );

@@ -10,3 +10,50 @@ body {
   -webkit-user-select: none;
   user-select: none;
 }
+
+/* Menu animations */
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes menu-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.animate-menu-in {
+  animation: menu-in 0.15s ease-out both;
+}
+
+/* Fade in for page transitions */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out both;
+}
+
+/* Slide up for floating panels */
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.2s ease-out both;
+}

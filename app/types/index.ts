@@ -49,6 +49,7 @@ export interface ImageStroke {
   y: number;
   width: number;
   height: number;
+  opacity?: number; // 0-1, default 1
 }
 
 export type Stroke = FreehandStroke | LineStroke | RectStroke | EllipseStroke | ImageStroke;

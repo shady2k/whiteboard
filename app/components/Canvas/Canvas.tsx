@@ -1,9 +1,9 @@
 'use client';
 
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
 import { Point, Stroke, FreehandStroke, ImageStroke, StrokeStyle, ToolType, BackgroundPattern } from '@/app/types';
 import { drawFreehandPoints } from '@/app/utils/drawStroke';
-import { renderStroke } from '@/app/utils/renderStroke';
+import { renderStroke, renderAllStrokes } from '@/app/utils/renderStroke';
 import { drawLinePreview, drawRectPreview, drawEllipsePreview } from '@/app/utils/drawShape';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { snapLineEnd, snapRectEnd, snapEllipseEnd } from '@/app/utils/snapShape';
@@ -16,10 +16,12 @@ interface CanvasProps {
   strokeStyle: StrokeStyle;
   backgroundColor: string;
   backgroundPattern: BackgroundPattern;
+  scale: number;
   onStrokeComplete: (stroke: Stroke) => void;
   onStrokeDelete?: (strokeId: string) => void;
   onImageTransform?: (strokeId: string, newStroke: ImageStroke) => void;
   onToolChange?: (tool: ToolType) => void;
+  onZoomChange?: (zoom: number) => void;
 }
 
 type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se';
@@ -30,10 +32,12 @@ export default function Canvas({
   strokeStyle,
   backgroundColor,
   backgroundPattern,
+  scale,
   onStrokeComplete,
   onStrokeDelete,
   onImageTransform,
   onToolChange,
+  onZoomChange,
 }: CanvasProps) {
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const inkCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -51,26 +55,36 @@ export default function Canvas({
   const dragHandleRef = useRef<DragHandle | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragOriginalRef = useRef<ImageStroke | null>(null);
+  const draggingImageIdRef = useRef<string | null>(null);
+
+  // Image selection UI state
+  const [selectedImage, setSelectedImage] = useState<ImageStroke | null>(null);
+  const [lockProportions, setLockProportions] = useState(true);
+  const [isDragging, setIsDragging] = useState(false);
 
   const activeToolRef = useRef(activeTool);
   const strokeStyleRef = useRef(strokeStyle);
   const strokesRef = useRef(strokes);
   const bgPatternRef = useRef(backgroundPattern);
   const bgColorRef = useRef(backgroundColor);
+  const scaleRef = useRef(scale);
   const onStrokeCompleteRef = useRef(onStrokeComplete);
   const onStrokeDeleteRef = useRef(onStrokeDelete);
   const onImageTransformRef = useRef(onImageTransform);
   const onToolChangeRef = useRef(onToolChange);
+  const onZoomChangeRef = useRef(onZoomChange);
 
   activeToolRef.current = activeTool;
   strokeStyleRef.current = strokeStyle;
   strokesRef.current = strokes;
   bgPatternRef.current = backgroundPattern;
   bgColorRef.current = backgroundColor;
+  scaleRef.current = scale;
   onStrokeCompleteRef.current = onStrokeComplete;
   onStrokeDeleteRef.current = onStrokeDelete;
   onImageTransformRef.current = onImageTransform;
   onToolChangeRef.current = onToolChange;
+  onZoomChangeRef.current = onZoomChange;
 
   const getCtx = useCallback((canvas: HTMLCanvasElement | null): CanvasRenderingContext2D | null => {
     return canvas?.getContext('2d') ?? null;
@@ -79,6 +93,15 @@ export default function Canvas({
   const getViewportSize = useCallback(() => {
     return { w: window.innerWidth, h: window.innerHeight };
   }, []);
+
+  // Compute pan offset for center-based zoom
+  const getTransform = useCallback(() => {
+    const { w, h } = getViewportSize();
+    const s = scaleRef.current;
+    const panX = (w / 2) * (1 - s);
+    const panY = (h / 2) * (1 - s);
+    return { panX, panY, scale: s };
+  }, [getViewportSize]);
 
   const resizeCanvases = useCallback(() => {
     const dpr = window.devicePixelRatio || 1;
@@ -100,19 +123,36 @@ export default function Canvas({
     const ctx = getCtx(bgCanvasRef.current);
     if (!ctx) return;
     const { w, h } = getViewportSize();
-    drawBackground(ctx, w, h, bgPatternRef.current, bgColorRef.current);
-  }, [getCtx, getViewportSize]);
+    const { panX, panY, scale: s } = getTransform();
+
+    // Clear in screen space
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(s, s);
+    // Draw background large enough to cover visible area
+    const visW = w / s + Math.abs(panX) / s * 2;
+    const visH = h / s + Math.abs(panY) / s * 2;
+    const offsetX = panX < 0 ? -panX / s : 0;
+    const offsetY = panY < 0 ? -panY / s : 0;
+    ctx.translate(-offsetX, -offsetY);
+    drawBackground(ctx, visW, visH, bgPatternRef.current, bgColorRef.current);
+    ctx.restore();
+  }, [getCtx, getViewportSize, getTransform]);
 
   const redrawInk = useCallback(() => {
     const ctx = getCtx(inkCanvasRef.current);
     if (!ctx) return;
     const { w, h } = getViewportSize();
+    const { panX, panY, scale: s } = getTransform();
     ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(s, s);
     const triggerRedraw = () => redrawInk();
-    for (const stroke of strokesRef.current) {
-      renderStroke(ctx, stroke, triggerRedraw);
-    }
-  }, [getCtx, getViewportSize]);
+    renderAllStrokes(ctx, strokesRef.current, triggerRedraw, draggingImageIdRef.current ?? undefined);
+    ctx.restore();
+  }, [getCtx, getViewportSize, getTransform]);
 
   const clearPreview = useCallback(() => {
     const ctx = getCtx(previewCanvasRef.current);
@@ -123,27 +163,42 @@ export default function Canvas({
 
   // Draw selection handles for selected image
   const drawImageSelection = useCallback((ctx: CanvasRenderingContext2D, img: ImageStroke) => {
+    const { panX, panY, scale: s } = getTransform();
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(s, s);
+
     const { x, y, width, height } = img;
     // Selection border
     ctx.strokeStyle = '#3b82f6';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 3]);
+    ctx.lineWidth = 2 / s;
+    ctx.setLineDash([6 / s, 3 / s]);
     ctx.strokeRect(x, y, width, height);
     ctx.setLineDash([]);
 
     // Resize handles
-    const handleSize = 8;
+    const handleSize = 8 / s;
     ctx.fillStyle = '#3b82f6';
     const handles = [
-      { hx: x, hy: y },                         // nw
-      { hx: x + width, hy: y },                  // ne
-      { hx: x, hy: y + height },                 // sw
-      { hx: x + width, hy: y + height },         // se
+      { hx: x, hy: y },
+      { hx: x + width, hy: y },
+      { hx: x, hy: y + height },
+      { hx: x + width, hy: y + height },
     ];
     for (const h of handles) {
       ctx.fillRect(h.hx - handleSize / 2, h.hy - handleSize / 2, handleSize, handleSize);
     }
-  }, []);
+
+    // Opacity indicator
+    const opacity = img.opacity ?? 1;
+    if (opacity < 1) {
+      ctx.fillStyle = '#fff';
+      ctx.font = `${12 / s}px sans-serif`;
+      ctx.fillText(`${Math.round(opacity * 100)}%`, x, y - 6 / s);
+    }
+
+    ctx.restore();
+  }, [getTransform]);
 
   // Init + resize
   useEffect(() => {
@@ -163,6 +218,7 @@ export default function Canvas({
 
   useEffect(() => { redrawInk(); }, [strokes, redrawInk]);
   useEffect(() => { redrawBackground(); }, [backgroundColor, backgroundPattern, redrawBackground]);
+  useEffect(() => { redrawBackground(); redrawInk(); }, [scale]);
 
   // Track shift key
   useEffect(() => {
@@ -173,28 +229,46 @@ export default function Canvas({
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
   }, []);
 
+  // Pinch-to-zoom (trackpad/gesture) and Ctrl+wheel
+  useEffect(() => {
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const delta = -e.deltaY * 0.01;
+        const newZoom = Math.max(0.25, Math.min(4, scaleRef.current + delta));
+        if (onZoomChangeRef.current) onZoomChangeRef.current(newZoom);
+      }
+    };
+    document.addEventListener('wheel', handleWheel, { passive: false });
+    return () => document.removeEventListener('wheel', handleWheel);
+  }, []);
+
   // Deselect image when tool changes away from pen
   useEffect(() => {
     selectedImageRef.current = null;
+    setSelectedImage(null);
     clearPreview();
   }, [activeTool, clearPreview]);
 
   const getPoint = useCallback((e: PointerEvent): Point => {
     const canvas = previewCanvasRef.current!;
     const rect = canvas.getBoundingClientRect();
+    const { panX, panY, scale: s } = getTransform();
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
     const pressure = e.pointerType === 'mouse' ? 0.5 : (e.pressure || 0.5);
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top, pressure };
-  }, []);
+    return { x: (screenX - panX) / s, y: (screenY - panY) / s, pressure };
+  }, [getTransform]);
 
   // Find image stroke at point and which handle (if any)
   const findImageAtPoint = useCallback((p: Point): { stroke: ImageStroke; handle: DragHandle } | null => {
-    const handleSize = 12;
+    const s = scaleRef.current;
+    const handleSize = 12 / s;
     for (let i = strokesRef.current.length - 1; i >= 0; i--) {
       const stroke = strokesRef.current[i];
       if (stroke.type !== 'image') continue;
       const { x, y, width, height } = stroke;
 
-      // Check resize handles first
       const corners: { hx: number; hy: number; handle: DragHandle }[] = [
         { hx: x, hy: y, handle: 'nw' },
         { hx: x + width, hy: y, handle: 'ne' },
@@ -207,7 +281,6 @@ export default function Canvas({
         }
       }
 
-      // Check inside image bounds
       if (p.x >= x && p.x <= x + width && p.y >= y && p.y <= y + height) {
         return { stroke, handle: 'move' };
       }
@@ -216,7 +289,7 @@ export default function Canvas({
   }, []);
 
   const findStrokeAtPoint = useCallback((p: Point): string | null => {
-    const eraserRadius = 10;
+    const eraserRadius = 10 / scaleRef.current;
     for (let i = strokesRef.current.length - 1; i >= 0; i--) {
       const stroke = strokesRef.current[i];
       if (stroke.type === 'freehand') {
@@ -256,7 +329,6 @@ export default function Canvas({
       e.preventDefault();
       canvas.setPointerCapture(e.pointerId);
 
-      // XP-Pen barrel button → eraser (button 2 or 5, or eraser end)
       const isBarrelButton = e.button === 2 || e.button === 5;
       const isEraserEnd = (e as PointerEvent & { pointerType: string }).pointerType === 'pen' &&
         ((e as unknown as { pressure: number }).pressure > 0) &&
@@ -275,19 +347,23 @@ export default function Canvas({
         const imgHit = findImageAtPoint(point);
         if (imgHit) {
           selectedImageRef.current = imgHit.stroke;
+          setSelectedImage(imgHit.stroke);
+          setIsDragging(false);
           dragHandleRef.current = imgHit.handle;
           dragStartRef.current = { x: point.x, y: point.y };
           dragOriginalRef.current = { ...imgHit.stroke };
+          draggingImageIdRef.current = null; // Don't hide from ink yet — only on actual drag
           isDrawingRef.current = true;
 
-          // Draw selection
+          // Draw selection handles only on preview (ink canvas has the image)
           clearPreview();
-          const ctx = getCtx(previewCanvasRef.current);
-          if (ctx) drawImageSelection(ctx, imgHit.stroke);
+          drawImageSelection(getCtx(previewCanvasRef.current)!, imgHit.stroke);
           return;
         } else {
-          // Clicked outside any image — deselect and start drawing
           selectedImageRef.current = null;
+          setSelectedImage(null);
+          setIsDragging(false);
+          draggingImageIdRef.current = null;
         }
       }
 
@@ -315,6 +391,25 @@ export default function Canvas({
         const dy = point.y - dragStartRef.current.y;
         const orig = dragOriginalRef.current;
         const handle = dragHandleRef.current;
+        const aspectRatio = orig.width / orig.height;
+
+        // On first actual movement, hide image from ink canvas and show on preview
+        if (!draggingImageIdRef.current && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+          draggingImageIdRef.current = orig.id;
+          setIsDragging(true);
+          // Redraw ink without this image
+          const inkCtx = getCtx(inkCanvasRef.current);
+          if (inkCtx) {
+            const { w, h } = getViewportSize();
+            const { panX, panY, scale: s } = getTransform();
+            inkCtx.clearRect(0, 0, w, h);
+            inkCtx.save();
+            inkCtx.translate(panX, panY);
+            inkCtx.scale(s, s);
+            renderAllStrokes(inkCtx, strokesRef.current, () => {}, orig.id);
+            inkCtx.restore();
+          }
+        }
 
         let newImg: ImageStroke;
         if (handle === 'move') {
@@ -325,6 +420,29 @@ export default function Canvas({
           else if (handle === 'sw') { nx = orig.x + dx; nw = orig.width - dx; nh = orig.height + dy; }
           else if (handle === 'ne') { ny = orig.y + dy; nw = orig.width + dx; nh = orig.height - dy; }
           else if (handle === 'nw') { nx = orig.x + dx; ny = orig.y + dy; nw = orig.width - dx; nh = orig.height - dy; }
+
+          // Lock proportions when shift is held or lock is on
+          if (shiftHeldRef.current || lockProportionsRef.current) {
+            if (handle === 'se' || handle === 'nw') {
+              // Use the larger delta to determine new size
+              if (Math.abs(dx) > Math.abs(dy)) {
+                nh = nw / aspectRatio;
+                if (handle === 'nw') ny = orig.y + orig.height - nh;
+              } else {
+                nw = nh * aspectRatio;
+                if (handle === 'nw') nx = orig.x + orig.width - nw;
+              }
+            } else if (handle === 'ne' || handle === 'sw') {
+              if (Math.abs(dx) > Math.abs(dy)) {
+                nh = nw / aspectRatio;
+                if (handle === 'ne') ny = orig.y + orig.height - nh;
+              } else {
+                nw = nh * aspectRatio;
+                if (handle === 'sw') nx = orig.x + orig.width - nw;
+              }
+            }
+          }
+
           // Enforce minimum size
           if (nw < 20) { nw = 20; nx = handle.includes('w') ? orig.x + orig.width - 20 : nx; }
           if (nh < 20) { nh = 20; ny = handle.includes('n') ? orig.y + orig.height - 20 : ny; }
@@ -338,9 +456,18 @@ export default function Canvas({
           clearPreview();
           const ctx = getCtx(previewCanvasRef.current);
           if (!ctx) return;
-          // Draw the image at its new position on preview
+          const { panX, panY, scale: s } = getTransform();
+          ctx.save();
+          ctx.translate(panX, panY);
+          ctx.scale(s, s);
           const img = getCachedImage(newImg.assetId);
-          if (img) ctx.drawImage(img, newImg.x, newImg.y, newImg.width, newImg.height);
+          if (img) {
+            const opacity = newImg.opacity ?? 1;
+            if (opacity < 1) ctx.globalAlpha = opacity;
+            ctx.drawImage(img, newImg.x, newImg.y, newImg.width, newImg.height);
+            if (opacity < 1) ctx.globalAlpha = 1;
+          }
+          ctx.restore();
           drawImageSelection(ctx, newImg);
         });
         return;
@@ -356,7 +483,12 @@ export default function Canvas({
           clearPreview();
           const ctx = getCtx(previewCanvasRef.current);
           if (ctx && currentPointsRef.current.length > 0) {
+            const { panX, panY, scale: s } = getTransform();
+            ctx.save();
+            ctx.translate(panX, panY);
+            ctx.scale(s, s);
             drawFreehandPoints(ctx, currentPointsRef.current, strokeStyleRef.current.color, strokeStyleRef.current.baseWidth);
+            ctx.restore();
           }
         });
       } else if (tool === 'eraser') {
@@ -368,8 +500,12 @@ export default function Canvas({
           clearPreview();
           const ctx = getCtx(previewCanvasRef.current);
           if (ctx) {
+            const { panX, panY, scale: s } = getTransform();
+            // Draw eraser circle in screen space
+            const screenX = point.x * s + panX;
+            const screenY = point.y * s + panY;
             ctx.beginPath();
-            ctx.arc(point.x, point.y, 10, 0, Math.PI * 2);
+            ctx.arc(screenX, screenY, 10, 0, Math.PI * 2);
             ctx.strokeStyle = '#999';
             ctx.lineWidth = 1;
             ctx.stroke();
@@ -391,9 +527,14 @@ export default function Canvas({
             else if (tool === 'ellipse') end = snapEllipseEnd(start, end);
           }
 
+          const { panX, panY, scale: s } = getTransform();
+          ctx.save();
+          ctx.translate(panX, panY);
+          ctx.scale(s, s);
           if (tool === 'line') drawLinePreview(ctx, start, end, strokeStyleRef.current);
           else if (tool === 'rect') drawRectPreview(ctx, start, end, strokeStyleRef.current);
           else if (tool === 'ellipse') drawEllipsePreview(ctx, start, end, strokeStyleRef.current);
+          ctx.restore();
         });
       }
     };
@@ -407,6 +548,7 @@ export default function Canvas({
       if (dragHandleRef.current && selectedImageRef.current && dragOriginalRef.current) {
         const newImg = selectedImageRef.current;
         const origImg = dragOriginalRef.current;
+        const wasDragging = !!draggingImageIdRef.current;
         if (newImg.x !== origImg.x || newImg.y !== origImg.y ||
             newImg.width !== origImg.width || newImg.height !== origImg.height) {
           if (onImageTransformRef.current) {
@@ -416,7 +558,35 @@ export default function Canvas({
         dragHandleRef.current = null;
         dragStartRef.current = null;
         dragOriginalRef.current = null;
-        // Keep selection visible
+        draggingImageIdRef.current = null;
+        setSelectedImage(newImg);
+        setIsDragging(false);
+
+        // If we were actually dragging, ink canvas needs to re-include the image
+        // (strokes update from onImageTransform will trigger redrawInk)
+        // Preview: just show selection handles, ink canvas shows the image
+        if (wasDragging) {
+          // Force ink redraw to include all strokes
+          const inkCtx = getCtx(inkCanvasRef.current);
+          if (inkCtx) {
+            const { w, h } = getViewportSize();
+            const { panX, panY, scale: s } = getTransform();
+            inkCtx.clearRect(0, 0, w, h);
+            inkCtx.save();
+            inkCtx.translate(panX, panY);
+            inkCtx.scale(s, s);
+            // Use current strokes (transform hasn't been applied yet, so draw newImg manually)
+            for (const st of strokesRef.current) {
+              if (st.id === newImg.id) {
+                renderStroke(inkCtx, newImg, () => {});
+              } else {
+                renderStroke(inkCtx, st, () => {});
+              }
+            }
+            inkCtx.restore();
+          }
+        }
+
         clearPreview();
         const ctx = getCtx(previewCanvasRef.current);
         if (ctx) drawImageSelection(ctx, newImg);
@@ -425,6 +595,12 @@ export default function Canvas({
 
       const tool = activeToolRef.current;
       const style = strokeStyleRef.current;
+
+      // Always clear eraser cursor
+      if (tool === 'eraser') {
+        clearPreview();
+        return;
+      }
 
       if (tool === 'pen' && currentPointsRef.current.length > 0) {
         const stroke: FreehandStroke = { type: 'freehand', id: uuidv4(), points: [...currentPointsRef.current], style: { ...style } };
@@ -458,7 +634,6 @@ export default function Canvas({
       }
     };
 
-    // Prevent context menu from barrel button
     const onContextMenu = (e: Event) => e.preventDefault();
 
     canvas.addEventListener('pointerdown', onPointerDown);
@@ -475,13 +650,90 @@ export default function Canvas({
       canvas.removeEventListener('contextmenu', onContextMenu);
       cancelAnimationFrame(rafIdRef.current);
     };
-  }, [getPoint, getCtx, clearPreview, findStrokeAtPoint, findImageAtPoint, drawImageSelection]);
+  }, [getPoint, getCtx, getViewportSize, getTransform, clearPreview, findStrokeAtPoint, findImageAtPoint, drawImageSelection]);
+
+  // Lock proportions ref for use in pointer handler
+  const lockProportionsRef = useRef(lockProportions);
+  lockProportionsRef.current = lockProportions;
+
+  // Handle opacity change for selected image
+  const handleOpacityChange = useCallback((opacity: number) => {
+    if (!selectedImage) return;
+    const updated = { ...selectedImage, opacity };
+    selectedImageRef.current = updated;
+    setSelectedImage(updated);
+    if (onImageTransformRef.current) {
+      onImageTransformRef.current(selectedImage.id, updated);
+    }
+    // Redraw preview with just selection handles (ink canvas will redraw from strokes update)
+    clearPreview();
+    const ctx = getCtx(previewCanvasRef.current);
+    if (ctx) drawImageSelection(ctx, updated);
+  }, [selectedImage, clearPreview, getCtx, drawImageSelection]);
+
+  // Compute screen position for floating controls
+  const getSelectionScreenPos = useCallback(() => {
+    if (!selectedImage) return null;
+    const { panX, panY, scale: s } = getTransform();
+    const screenX = selectedImage.x * s + panX;
+    const screenY = (selectedImage.y + selectedImage.height) * s + panY + 8;
+    return { x: screenX, y: screenY };
+  }, [selectedImage, getTransform]);
+
+  const selPos = getSelectionScreenPos();
 
   return (
     <div className="fixed inset-0 overflow-hidden">
       <canvas ref={bgCanvasRef} className="absolute inset-0 touch-none cursor-crosshair" />
       <canvas ref={inkCanvasRef} className="absolute inset-0 touch-none cursor-crosshair" />
       <canvas ref={previewCanvasRef} className="absolute inset-0 touch-none cursor-crosshair" />
+
+      {/* Image selection controls — hidden while dragging */}
+      {selectedImage && selPos && activeTool === 'pen' && !isDragging && (
+        <div
+          className="fixed z-50 bg-neutral-900/90 backdrop-blur-md rounded-lg px-2 py-1.5 flex items-center gap-2 shadow-xl border border-neutral-700/50 animate-slide-up"
+          style={{ left: selPos.x, top: selPos.y }}
+          onPointerDown={e => e.stopPropagation()}
+        >
+          {/* Lock proportions */}
+          <button
+            className={`w-7 h-7 rounded flex items-center justify-center text-xs cursor-pointer transition-colors border-none
+              ${lockProportions ? 'bg-blue-500/30 text-blue-400' : 'bg-transparent text-neutral-400 hover:bg-white/10'}`}
+            onClick={() => setLockProportions(!lockProportions)}
+            title={lockProportions ? 'Unlock proportions' : 'Lock proportions'}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {lockProportions ? (
+                <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>
+              ) : (
+                <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></>
+              )}
+            </svg>
+          </button>
+
+          {/* Opacity slider */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-neutral-500 text-[10px]">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.6">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 2a10 10 0 0 1 0 20" fill="currentColor" opacity="0.3" />
+              </svg>
+            </span>
+            <input
+              type="range"
+              min="5"
+              max="100"
+              value={Math.round((selectedImage.opacity ?? 1) * 100)}
+              onChange={e => handleOpacityChange(Number(e.target.value) / 100)}
+              className="w-16 h-1 accent-blue-500"
+              title={`Opacity: ${Math.round((selectedImage.opacity ?? 1) * 100)}%`}
+            />
+            <span className="text-neutral-400 text-[10px] tabular-nums w-7">
+              {Math.round((selectedImage.opacity ?? 1) * 100)}%
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

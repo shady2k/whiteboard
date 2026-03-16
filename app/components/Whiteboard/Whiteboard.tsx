@@ -8,6 +8,8 @@ import PageNav from '@/app/components/PageNav/PageNav';
 import { useAutoSave } from '@/app/hooks/useAutoSave';
 import { v4 as uuidv4 } from 'uuid';
 import { exportPageAsPng, exportAllPagesAsPdf, downloadBlob } from '@/app/utils/exportPage';
+import { drawBackground } from '@/app/utils/drawGrid';
+import { renderAllStrokes } from '@/app/utils/renderStroke';
 
 function getImageDimensions(url: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve) => {
@@ -24,18 +26,19 @@ interface WhiteboardProps {
   sessionName: string;
 }
 
+const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+
 export default function Whiteboard({ sessionId, initialPages, sessionName: initialName }: WhiteboardProps) {
-  const [pages, setPages] = useState<Page[]>(initialPages);
-  const [currentPageIndex, setCurrentPageIndex] = useState(0);
-  const [sessionName, setSessionName] = useState(initialName);
+  const [page, setPage] = useState<Page>(initialPages[0]);
+  const [sessionName] = useState(initialName);
   const [activeTool, setActiveTool] = useState<ToolType>('pen');
   const [strokeStyle, setStrokeStyle] = useState<StrokeStyle>({
     color: '#000000',
     baseWidth: 4,
   });
+  const [zoom, setZoom] = useState(1);
 
-  const currentPage = pages[currentPageIndex];
-  const strokes = currentPage?.strokes ?? [];
+  const strokes = page?.strokes ?? [];
 
   // Undo/redo stacks
   const [undoStack, setUndoStack] = useState<Command[]>([]);
@@ -44,17 +47,55 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   // Autosave
   const { saveStrokes, saveImmediate } = useAutoSave({
     sessionId,
-    pageId: currentPage?.id ?? '',
+    pageId: page?.id ?? '',
   });
 
-  // Track strokes for autosave
   const strokesRef = useRef(strokes);
   strokesRef.current = strokes;
 
+  // Generate and save thumbnail
+  const thumbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const generateAndSaveThumb = useCallback(() => {
+    try {
+      const canvas = document.createElement('canvas');
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const tw = 360;
+      const th = Math.round(tw * (vh / vw));
+      canvas.width = tw;
+      canvas.height = th;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.scale(tw / vw, th / vh);
+      drawBackground(ctx, vw, vh, page?.backgroundPattern || 'blank', page?.backgroundColor || '#ffffff');
+      renderAllStrokes(ctx, strokesRef.current, () => {
+        // An image just finished loading — re-generate thumbnail
+        generateAndSaveThumb();
+      });
+      const dataUrl = canvas.toDataURL('image/png', 0.7);
+      fetch(`/api/sessions/${sessionId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thumbnail: dataUrl }),
+      }).catch(() => {});
+    } catch {}
+  }, [sessionId, page?.backgroundPattern, page?.backgroundColor]);
+
+  const saveThumbnail = useCallback(() => {
+    if (thumbTimerRef.current) clearTimeout(thumbTimerRef.current);
+    thumbTimerRef.current = setTimeout(generateAndSaveThumb, 2000);
+  }, [generateAndSaveThumb]);
+
+  // Trigger thumbnail save when strokes change
+  useEffect(() => {
+    saveThumbnail();
+  }, [strokes, saveThumbnail]);
+
   const updatePageStrokes = useCallback((pageId: string, updater: (strokes: Stroke[]) => Stroke[]) => {
-    setPages(prev => prev.map(p =>
-      p.id === pageId ? { ...p, strokes: updater(p.strokes) } : p
-    ));
+    setPage(prev => {
+      if (prev.id !== pageId) return prev;
+      return { ...prev, strokes: updater(prev.strokes) };
+    });
   }, []);
 
   const pushCommand = useCallback((cmd: Command) => {
@@ -63,23 +104,22 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   }, []);
 
   const handleStrokeComplete = useCallback((stroke: Stroke) => {
-    const pageId = currentPage?.id;
+    const pageId = page?.id;
     if (!pageId) return;
     updatePageStrokes(pageId, s => [...s, stroke]);
     pushCommand({ type: 'createStroke', pageId, stroke });
-    // Debounced save
     setTimeout(() => saveStrokes(strokesRef.current), 0);
-  }, [currentPage?.id, updatePageStrokes, pushCommand, saveStrokes]);
+  }, [page?.id, updatePageStrokes, pushCommand, saveStrokes]);
 
   const handleStrokeDelete = useCallback((strokeId: string) => {
-    const pageId = currentPage?.id;
+    const pageId = page?.id;
     if (!pageId) return;
     const stroke = strokes.find(s => s.id === strokeId);
     if (!stroke) return;
     updatePageStrokes(pageId, s => s.filter(st => st.id !== strokeId));
     pushCommand({ type: 'deleteStroke', pageId, strokeId, stroke });
     setTimeout(() => saveStrokes(strokesRef.current), 0);
-  }, [currentPage?.id, strokes, updatePageStrokes, pushCommand, saveStrokes]);
+  }, [page?.id, strokes, updatePageStrokes, pushCommand, saveStrokes]);
 
   const undo = useCallback(() => {
     setUndoStack(prev => {
@@ -99,11 +139,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
           updatePageStrokes(cmd.pageId, () => cmd.strokes);
           break;
         case 'setPageBackground':
-          setPages(p => p.map(pg =>
-            pg.id === cmd.pageId
-              ? { ...pg, backgroundPattern: cmd.oldPattern, backgroundColor: cmd.oldColor }
-              : pg
-          ));
+          setPage(p => p.id === cmd.pageId
+            ? { ...p, backgroundPattern: cmd.oldPattern, backgroundColor: cmd.oldColor }
+            : p
+          );
           break;
         case 'transformImageStroke':
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.oldStroke : st));
@@ -134,11 +173,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
           updatePageStrokes(cmd.pageId, () => []);
           break;
         case 'setPageBackground':
-          setPages(p => p.map(pg =>
-            pg.id === cmd.pageId
-              ? { ...pg, backgroundPattern: cmd.newPattern, backgroundColor: cmd.newColor }
-              : pg
-          ));
+          setPage(p => p.id === cmd.pageId
+            ? { ...p, backgroundPattern: cmd.newPattern, backgroundColor: cmd.newColor }
+            : p
+          );
           break;
         case 'transformImageStroke':
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.newStroke : st));
@@ -152,97 +190,59 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   }, [updatePageStrokes, saveStrokes]);
 
   const handleBackgroundPatternChange = useCallback(async (pattern: BackgroundPattern) => {
-    const pageId = currentPage?.id;
+    const pageId = page?.id;
     if (!pageId) return;
-    const oldPattern = currentPage.backgroundPattern;
-    const oldColor = currentPage.backgroundColor;
+    const oldPattern = page.backgroundPattern;
+    const oldColor = page.backgroundColor;
     pushCommand({ type: 'setPageBackground', pageId, oldPattern, oldColor, newPattern: pattern, newColor: oldColor });
-    setPages(p => p.map(pg => pg.id === pageId ? { ...pg, backgroundPattern: pattern } : pg));
+    setPage(p => ({ ...p, backgroundPattern: pattern }));
     await fetch('/api/pages', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pageId, backgroundPattern: pattern, backgroundColor: oldColor }),
     });
-  }, [currentPage, pushCommand]);
+  }, [page, pushCommand]);
 
   const handleBackgroundColorChange = useCallback(async (color: string) => {
-    const pageId = currentPage?.id;
+    const pageId = page?.id;
     if (!pageId) return;
-    const oldPattern = currentPage.backgroundPattern;
-    const oldColor = currentPage.backgroundColor;
+    const oldPattern = page.backgroundPattern;
+    const oldColor = page.backgroundColor;
     pushCommand({ type: 'setPageBackground', pageId, oldPattern, oldColor, newPattern: oldPattern, newColor: color });
-    setPages(p => p.map(pg => pg.id === pageId ? { ...pg, backgroundColor: color } : pg));
+    setPage(p => ({ ...p, backgroundColor: color }));
     await fetch('/api/pages', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pageId, backgroundPattern: oldPattern, backgroundColor: color }),
     });
-  }, [currentPage, pushCommand]);
+  }, [page, pushCommand]);
 
   const clearCanvas = useCallback(() => {
-    const pageId = currentPage?.id;
+    const pageId = page?.id;
     if (!pageId || strokes.length === 0) return;
     pushCommand({ type: 'clearPage', pageId, strokes: [...strokes] });
     updatePageStrokes(pageId, () => []);
     saveImmediate([]);
-  }, [currentPage?.id, strokes, pushCommand, updatePageStrokes, saveImmediate]);
+  }, [page?.id, strokes, pushCommand, updatePageStrokes, saveImmediate]);
 
-  // Page management
-  const addPage = useCallback(async () => {
-    const position = currentPageIndex + 1;
-    try {
-      const res = await fetch('/api/pages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId,
-          position,
-          backgroundPattern: currentPage?.backgroundPattern || 'blank',
-          backgroundColor: currentPage?.backgroundColor || '#ffffff',
-        }),
-      });
-      const raw = await res.json();
-      const newPage: Page = {
-        id: raw.id,
-        sessionId: raw.session_id,
-        position: raw.position,
-        backgroundPattern: raw.background_pattern || 'blank',
-        backgroundColor: raw.background_color || '#ffffff',
-        strokes: [],
-      };
-      setPages(prev => {
-        const next = [...prev];
-        next.splice(position, 0, newPage);
-        return next;
-      });
-      setCurrentPageIndex(position);
-    } catch (e) {
-      console.error('Failed to add page:', e);
-    }
-  }, [sessionId, currentPageIndex]);
+  // Zoom controls
+  const zoomIn = useCallback(() => {
+    setZoom(z => {
+      const nextStep = ZOOM_STEPS.find(s => s > z + 0.01);
+      return nextStep ?? z;
+    });
+  }, []);
 
-  const deletePage = useCallback(async () => {
-    if (pages.length <= 1) return;
-    const page = currentPage;
-    if (!page) return;
-    try {
-      await fetch('/api/pages', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pageId: page.id, sessionId }),
-      });
-      setPages(prev => prev.filter(p => p.id !== page.id));
-      setCurrentPageIndex(i => Math.min(i, pages.length - 2));
-    } catch (e) {
-      console.error('Failed to delete page:', e);
-    }
-  }, [pages, currentPage, sessionId]);
+  const zoomOut = useCallback(() => {
+    setZoom(z => {
+      const prevStep = [...ZOOM_STEPS].reverse().find(s => s < z - 0.01);
+      return prevStep ?? z;
+    });
+  }, []);
 
-  const goToPage = useCallback((index: number) => {
-    if (index >= 0 && index < pages.length) {
-      setCurrentPageIndex(index);
-    }
-  }, [pages.length]);
+  const zoomReset = useCallback(() => {
+    setZoom(1);
+  }, []);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -258,6 +258,15 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       } else if (isCmd && e.key === 'y') {
         e.preventDefault();
         redo();
+      } else if (isCmd && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        zoomIn();
+      } else if (isCmd && e.key === '-') {
+        e.preventDefault();
+        zoomOut();
+      } else if (isCmd && e.key === '0') {
+        e.preventDefault();
+        zoomReset();
       } else if (!isCmd && !e.altKey) {
         switch (e.key.toLowerCase()) {
           case 'p': setActiveTool('pen'); break;
@@ -265,19 +274,17 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
           case 'l': setActiveTool('line'); break;
           case 'r': setActiveTool('rect'); break;
           case 'o': setActiveTool('ellipse'); break;
-          case 'arrowleft': goToPage(currentPageIndex - 1); break;
-          case 'arrowright': goToPage(currentPageIndex + 1); break;
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, goToPage, currentPageIndex]);
+  }, [undo, redo, zoomIn, zoomOut, zoomReset]);
 
   // Upload image to server and create ImageStroke
   const uploadAndCreateImageStroke = useCallback(async (file: File | Blob, mimeType?: string): Promise<ImageStroke | null> => {
-    const pageId = currentPage?.id;
+    const pageId = page?.id;
     if (!pageId) return null;
 
     try {
@@ -290,12 +297,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       const res = await fetch('/api/assets', { method: 'POST', body: formData });
       const { id: assetId } = await res.json();
 
-      // Get image dimensions
       const url = URL.createObjectURL(file);
       const dims = await getImageDimensions(url);
       URL.revokeObjectURL(url);
 
-      // Scale to fit reasonably on screen
       const maxW = window.innerWidth * 0.6;
       const maxH = window.innerHeight * 0.6;
       let w = dims.width;
@@ -303,7 +308,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       if (w > maxW) { h *= maxW / w; w = maxW; }
       if (h > maxH) { w *= maxH / h; h = maxH; }
 
-      // Center on screen
       const x = (window.innerWidth - w) / 2;
       const y = (window.innerHeight - h) / 2;
 
@@ -321,7 +325,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       console.error('Failed to upload image:', e);
       return null;
     }
-  }, [currentPage?.id]);
+  }, [page?.id]);
 
   // Clipboard paste handler
   useEffect(() => {
@@ -359,21 +363,23 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
       try {
         const pdfjsLib = await import('pdfjs-dist');
-        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+        // Use local worker from node_modules
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
+        // Import all pages as images on the single canvas
         for (let i = 0; i < pdf.numPages; i++) {
-          const page = await pdf.getPage(i + 1);
-          const viewport = page.getViewport({ scale: 2 });
+          const pdfPage = await pdf.getPage(i + 1);
+          const viewport = pdfPage.getViewport({ scale: 2 });
 
           const canvas = document.createElement('canvas');
           canvas.width = viewport.width;
           canvas.height = viewport.height;
           const ctx = canvas.getContext('2d')!;
 
-          await page.render({ canvasContext: ctx, viewport, canvas } as never).promise;
+          await pdfPage.render({ canvasContext: ctx, viewport, canvas } as never).promise;
 
           const blob = await new Promise<Blob>((resolve) =>
             canvas.toBlob(b => resolve(b!), 'image/png')
@@ -381,44 +387,11 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
           const stroke = await uploadAndCreateImageStroke(blob, 'image/png');
           if (stroke) {
-            // If it's the first page, add to current page
-            // For subsequent pages, create new pages
-            if (i === 0) {
-              handleStrokeComplete(stroke);
-            } else {
-              // Add a new page and place the image
-              const position = currentPageIndex + i;
-              const res = await fetch('/api/pages', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  sessionId,
-                  position,
-                  backgroundPattern: currentPage?.backgroundPattern || 'blank',
-                  backgroundColor: currentPage?.backgroundColor || '#ffffff',
-                }),
-              });
-              const raw2 = await res.json();
-              const newPage: Page = {
-                id: raw2.id,
-                sessionId: raw2.session_id,
-                position: raw2.position,
-                backgroundPattern: raw2.background_pattern || 'blank',
-                backgroundColor: raw2.background_color || '#ffffff',
-                strokes: [stroke],
-              };
-              setPages(prev => {
-                const next = [...prev];
-                next.splice(position, 0, newPage);
-                return next;
-              });
-              // Save the stroke to the new page
-              await fetch('/api/strokes', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pageId: newPage.id, sessionId, strokes: [stroke] }),
-              });
+            // Offset each subsequent page image downward
+            if (i > 0) {
+              stroke.y = stroke.y + i * (stroke.height + 20);
             }
+            handleStrokeComplete(stroke);
           }
         }
       } catch (e) {
@@ -427,7 +400,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       }
     };
     input.click();
-  }, [uploadAndCreateImageStroke, handleStrokeComplete, currentPageIndex, sessionId, currentPage]);
+  }, [uploadAndCreateImageStroke, handleStrokeComplete]);
 
   // Drag and drop handler
   useEffect(() => {
@@ -446,27 +419,29 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
           const stroke = await uploadAndCreateImageStroke(file);
           if (stroke) handleStrokeComplete(stroke);
         } else if (file.type === 'application/pdf') {
-          // Trigger PDF import with the dropped file
-          // Re-use the same logic but with the file directly
           try {
             const pdfjsLib = await import('pdfjs-dist');
-            pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+            const workerUrl = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url);
+            pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl.toString();
             const arrayBuffer = await file.arrayBuffer();
             const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
             for (let i = 0; i < pdf.numPages; i++) {
-              const page = await pdf.getPage(i + 1);
-              const viewport = page.getViewport({ scale: 2 });
+              const pdfPage = await pdf.getPage(i + 1);
+              const viewport = pdfPage.getViewport({ scale: 2 });
               const canvas = document.createElement('canvas');
               canvas.width = viewport.width;
               canvas.height = viewport.height;
               const ctx = canvas.getContext('2d')!;
-              await page.render({ canvasContext: ctx, viewport, canvas } as never).promise;
+              await pdfPage.render({ canvasContext: ctx, viewport, canvas } as never).promise;
               const blob = await new Promise<Blob>((resolve) =>
                 canvas.toBlob(b => resolve(b!), 'image/png')
               );
               const stroke = await uploadAndCreateImageStroke(blob, 'image/png');
-              if (stroke) handleStrokeComplete(stroke);
+              if (stroke) {
+                if (i > 0) stroke.y = stroke.y + i * (stroke.height + 20);
+                handleStrokeComplete(stroke);
+              }
             }
           } catch (err) {
             console.error('PDF drop import failed:', err);
@@ -484,39 +459,26 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   }, [uploadAndCreateImageStroke, handleStrokeComplete]);
 
   const handleExportPng = useCallback(async () => {
-    if (!currentPage) return;
-    const blob = await exportPageAsPng(strokes, currentPage.backgroundPattern, currentPage.backgroundColor);
-    downloadBlob(blob, `${sessionName}-page-${currentPageIndex + 1}.png`);
-  }, [currentPage, strokes, sessionName, currentPageIndex]);
+    if (!page) return;
+    const blob = await exportPageAsPng(strokes, page.backgroundPattern, page.backgroundColor);
+    downloadBlob(blob, `${sessionName}.png`);
+  }, [page, strokes, sessionName]);
 
   const handleExportPdf = useCallback(async () => {
-    await exportAllPagesAsPdf(pages, sessionName);
-  }, [pages, sessionName]);
-
-  const handleSessionRename = useCallback(async (name: string) => {
-    setSessionName(name);
-    try {
-      await fetch(`/api/sessions/${sessionId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-    } catch (e) {
-      console.error('Failed to rename session:', e);
-    }
-  }, [sessionId]);
+    await exportAllPagesAsPdf([page], sessionName);
+  }, [page, sessionName]);
 
   const handleImageTransform = useCallback((strokeId: string, newStroke: ImageStroke) => {
-    const pageId = currentPage?.id;
+    const pageId = page?.id;
     if (!pageId) return;
     const oldStroke = strokes.find(s => s.id === strokeId) as ImageStroke | undefined;
     if (!oldStroke) return;
     pushCommand({ type: 'transformImageStroke', pageId, strokeId, oldStroke, newStroke });
     updatePageStrokes(pageId, s => s.map(st => st.id === strokeId ? newStroke : st));
     setTimeout(() => saveStrokes(strokesRef.current), 0);
-  }, [currentPage?.id, strokes, pushCommand, updatePageStrokes, saveStrokes]);
+  }, [page?.id, strokes, pushCommand, updatePageStrokes, saveStrokes]);
 
-  if (!currentPage) return null;
+  if (!page) return null;
 
   return (
     <>
@@ -524,18 +486,20 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         strokes={strokes}
         activeTool={activeTool}
         strokeStyle={strokeStyle}
-        backgroundColor={currentPage.backgroundColor}
-        backgroundPattern={currentPage.backgroundPattern}
+        backgroundColor={page.backgroundColor}
+        backgroundPattern={page.backgroundPattern}
+        scale={zoom}
         onStrokeComplete={handleStrokeComplete}
         onStrokeDelete={handleStrokeDelete}
         onImageTransform={handleImageTransform}
         onToolChange={setActiveTool}
+        onZoomChange={setZoom}
       />
       <Toolbar
         activeTool={activeTool}
         strokeStyle={strokeStyle}
-        backgroundPattern={currentPage.backgroundPattern}
-        backgroundColor={currentPage.backgroundColor}
+        backgroundPattern={page.backgroundPattern}
+        backgroundColor={page.backgroundColor}
         onToolChange={setActiveTool}
         onColorChange={color => setStrokeStyle(s => ({ ...s, color }))}
         onWidthChange={baseWidth => setStrokeStyle(s => ({ ...s, baseWidth }))}
@@ -551,13 +515,14 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         canRedo={redoStack.length > 0}
       />
       <PageNav
-        currentIndex={currentPageIndex}
-        pages={pages}
-        onGoToPage={goToPage}
-        onAddPage={addPage}
-        onDeletePage={deletePage}
         sessionName={sessionName}
-        onSessionRename={handleSessionRename}
+        zoom={zoom}
+        onZoomIn={zoomIn}
+        onZoomOut={zoomOut}
+        onZoomReset={zoomReset}
+        strokes={strokes}
+        backgroundPattern={page.backgroundPattern}
+        backgroundColor={page.backgroundColor}
       />
     </>
   );

@@ -59,6 +59,12 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_pages_session ON pages(session_id);
     CREATE INDEX IF NOT EXISTS idx_strokes_page ON strokes(page_id);
   `);
+
+  // Migration: add thumbnail column if missing
+  const cols = db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+  if (!cols.some(c => c.name === 'thumbnail')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN thumbnail TEXT DEFAULT NULL");
+  }
 }
 
 export default getDb;

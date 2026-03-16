@@ -34,7 +34,15 @@ function drawImageStroke(
 ): void {
   const img = getCachedImage(stroke.assetId);
   if (img) {
-    ctx.drawImage(img, stroke.x, stroke.y, stroke.width, stroke.height);
+    const opacity = stroke.opacity ?? 1;
+    if (opacity < 1) {
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      ctx.drawImage(img, stroke.x, stroke.y, stroke.width, stroke.height);
+      ctx.restore();
+    } else {
+      ctx.drawImage(img, stroke.x, stroke.y, stroke.width, stroke.height);
+    }
   } else if (onImageLoad) {
     loadImage(stroke.assetId, onImageLoad);
   }
@@ -43,9 +51,11 @@ function drawImageStroke(
 export function renderAllStrokes(
   ctx: CanvasRenderingContext2D,
   strokes: Stroke[],
-  onImageLoad?: () => void
+  onImageLoad?: () => void,
+  skipStrokeId?: string
 ): void {
   for (const stroke of strokes) {
+    if (skipStrokeId && stroke.id === skipStrokeId) continue;
     renderStroke(ctx, stroke, onImageLoad);
   }
 }
