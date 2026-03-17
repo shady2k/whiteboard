@@ -12,6 +12,7 @@ import {
   clearPendingAction,
   getPendingActions,
   putAsset,
+  putPage,
 } from '@/app/lib/idb';
 
 const MAX_RETRIES = 8;
@@ -153,6 +154,9 @@ export function useSyncEngine(sessionId: string) {
   const pendingPageRef = useRef<Page | null>(null);
   const pendingBgRef = useRef<Page | null>(null);
   const syncingRef = useRef(false);
+  // Track server revision per page for optimistic concurrency
+  const pageRevisionRef = useRef<Record<string, number>>({});
+  const onConflictRef = useRef<((serverStrokes: Stroke[]) => void) | null>(null);
 
   const doPageSync = useCallback(
     async (page: Page) => {
@@ -192,11 +196,30 @@ export function useSyncEngine(sessionId: string) {
             sessionId,
             strokes: resolvedStrokes,
             actionId,
+            expectedRevision: pageRevisionRef.current[page.id],
           }),
         });
+        if (res.status === 409) {
+          const body = await res.json();
+          if (body.conflict && body.strokes) {
+            // Server has newer data — hydrate locally
+            console.warn('Page sync conflict — accepting server version, revision:', body.revision);
+            pageRevisionRef.current[page.id] = body.revision;
+            const serverPage: Page = { ...page, strokes: body.strokes };
+            await putPage(serverPage, 0); // localUpdatedAt=0 so server wins next comparison
+            await clearDirty(page.id);
+            onConflictRef.current?.(body.strokes);
+          }
+          await clearPendingAction(actionId);
+          return;
+        }
         if (!res.ok) {
           console.error('Page sync failed with status:', res.status);
           return;
+        }
+        const result = await res.json();
+        if (result.revision !== undefined) {
+          pageRevisionRef.current[page.id] = result.revision;
         }
         await clearDirty(page.id);
         await clearPendingAction(actionId);
@@ -234,6 +257,10 @@ export function useSyncEngine(sessionId: string) {
         if (!res.ok) {
           console.error('Background sync failed with status:', res.status);
           return;
+        }
+        const result = await res.json();
+        if (result.revision !== undefined) {
+          pageRevisionRef.current[page.id] = result.revision;
         }
         await clearPendingAction(actionId);
       } catch (e) {
@@ -296,6 +323,20 @@ export function useSyncEngine(sessionId: string) {
               const payload = JSON.parse(action.payload);
               const res = await fetch(`/api/sessions/${payload.id}`, {
                 method: 'DELETE',
+              });
+              if (res.ok || res.status < 500) {
+                await clearPendingAction(action.actionId);
+              }
+            } catch {
+              // Will retry on next flush
+            }
+          } else if (action.type === 'sessionRename') {
+            try {
+              const payload = JSON.parse(action.payload);
+              const res = await fetch(`/api/sessions/${payload.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: payload.name }),
               });
               if (res.ok || res.status < 500) {
                 await clearPendingAction(action.actionId);
@@ -402,6 +443,14 @@ export function useSyncEngine(sessionId: string) {
     }
   }, [isOnline, flushAll]);
 
+  const setOnConflict = useCallback((cb: (serverStrokes: Stroke[]) => void) => {
+    onConflictRef.current = cb;
+  }, []);
+
+  const setPageRevision = useCallback((pageId: string, revision: number) => {
+    pageRevisionRef.current[pageId] = revision;
+  }, []);
+
   return {
     queuePageSync,
     queueBackgroundSync,
@@ -409,5 +458,7 @@ export function useSyncEngine(sessionId: string) {
     flushNow: flushAll,
     isOnline,
     isSyncing,
+    setOnConflict,
+    setPageRevision,
   };
 }

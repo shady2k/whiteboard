@@ -36,6 +36,7 @@ function initSchema(db: Database.Database) {
       position INTEGER NOT NULL DEFAULT 0,
       background_pattern TEXT NOT NULL DEFAULT 'blank',
       background_color TEXT NOT NULL DEFAULT '#ffffff',
+      revision INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 

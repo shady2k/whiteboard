@@ -121,7 +121,7 @@ export interface AssetMapping {
   remoteId: string;
 }
 
-export type PendingActionType = 'assetUpload' | 'pageSync' | 'backgroundSync' | 'thumbnailSync' | 'sessionCreate' | 'sessionDelete';
+export type PendingActionType = 'assetUpload' | 'pageSync' | 'backgroundSync' | 'thumbnailSync' | 'sessionCreate' | 'sessionDelete' | 'sessionRename';
 
 export interface PendingAction {
   actionId: string;

@@ -52,21 +52,22 @@ export async function PUT(request: Request) {
     }
   }
 
+  let newRevision = 0;
   const transaction = db.transaction(() => {
     db.prepare(
-      'UPDATE pages SET background_pattern = ?, background_color = ? WHERE id = ?'
+      'UPDATE pages SET background_pattern = ?, background_color = ?, revision = revision + 1 WHERE id = ?'
     ).run(backgroundPattern, backgroundColor, pageId);
 
-    // Update session timestamp so sort order reflects this change
-    const page = db.prepare('SELECT session_id FROM pages WHERE id = ?').get(pageId) as { session_id: string } | undefined;
-    if (page) {
+    const updated = db.prepare('SELECT revision, session_id FROM pages WHERE id = ?').get(pageId) as { revision: number; session_id: string } | undefined;
+    if (updated) {
+      newRevision = updated.revision;
       const now = new Date().toISOString();
-      db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, page.session_id);
+      db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, updated.session_id);
     }
   });
   transaction();
 
-  const result = { ok: true };
+  const result = { ok: true, revision: newRevision };
 
   // Update action log with result
   if (actionId) {

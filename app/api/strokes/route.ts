@@ -29,7 +29,7 @@ export async function POST(request: Request) {
 
 // PUT /api/strokes — replace all strokes for a page (used after clear/undo)
 export async function PUT(request: Request) {
-  const { pageId, sessionId, strokes, actionId } = await request.json();
+  const { pageId, sessionId, strokes, actionId, expectedRevision } = await request.json();
   const db = getDb();
 
   // Atomic dedup: claim the action ID first
@@ -45,6 +45,23 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: 'Action in progress' }, { status: 409 });
     }
   }
+
+  // Revision check: if client sends expectedRevision, verify it matches
+  if (expectedRevision !== undefined) {
+    const page = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number } | undefined;
+    if (page && page.revision !== expectedRevision) {
+      const currentStrokes = (db.prepare(
+        'SELECT id, type, data FROM strokes WHERE page_id = ? ORDER BY z_order'
+      ).all(pageId) as Array<{ id: string; type: string; data: string }>)
+        .map(s => ({ ...JSON.parse(s.data), id: s.id, type: s.type }));
+      return NextResponse.json({
+        conflict: true,
+        revision: page.revision,
+        strokes: currentStrokes,
+      }, { status: 409 });
+    }
+  }
+
   const now = new Date().toISOString();
 
   // Collect asset IDs referenced by old strokes before deleting
@@ -58,6 +75,7 @@ export async function PUT(request: Request) {
     'INSERT INTO strokes (id, page_id, type, data, z_order) VALUES (?, ?, ?, ?, ?)'
   );
 
+  let newRevision = 0;
   const transaction = db.transaction(() => {
     db.prepare('DELETE FROM strokes WHERE page_id = ?').run(pageId);
     for (let i = 0; i < strokes.length; i++) {
@@ -65,6 +83,9 @@ export async function PUT(request: Request) {
       const { id, type, ...rest } = stroke;
       insert.run(id, pageId, type, JSON.stringify(rest), i);
     }
+    db.prepare('UPDATE pages SET revision = revision + 1 WHERE id = ?').run(pageId);
+    const updated = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number };
+    newRevision = updated.revision;
     db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
   });
   transaction();
@@ -74,7 +95,7 @@ export async function PUT(request: Request) {
     cleanupOrphanedAssets(oldAssetIds);
   }
 
-  const result = { ok: true };
+  const result = { ok: true, revision: newRevision };
 
   // Update action log with result
   if (actionId) {

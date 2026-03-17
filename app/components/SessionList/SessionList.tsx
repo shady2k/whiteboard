@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { getAllSessions, putSession, putPage, putPendingAction, getPendingActions, clearPendingAction, getPagesBySession } from '@/app/lib/idb';
+import { getAllSessions, getSession, putSession, putPage, putPendingAction, getPendingActions, clearPendingAction, getPagesBySession } from '@/app/lib/idb';
 import { v4 as uuidv4 } from 'uuid';
 import type { Page } from '@/app/types';
 import WhiteboardLoader from '@/app/components/Whiteboard/WhiteboardLoader';
@@ -149,6 +149,15 @@ export default function SessionList() {
             if (res.ok || res.status < 500) {
               await clearPendingAction(action.actionId);
             }
+          } else if (action.type === 'sessionRename') {
+            const res = await fetch(`/api/sessions/${payload.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: payload.name }),
+            });
+            if (res.ok || res.status < 500) {
+              await clearPendingAction(action.actionId);
+            }
           }
         } catch { /* will retry next time */ }
       }
@@ -283,13 +292,73 @@ export default function SessionList() {
   };
 
   const cloneSession = async (id: string) => {
-    if (isOffline) return;
     setMenuId(null);
-    const res = await fetch(`/api/sessions/${id}`, { method: 'POST' });
-    const cloned = await res.json();
-    const listRes = await fetch('/api/sessions');
-    setSessions(await listRes.json());
-    router.push(`/session/${cloned.id}`);
+
+    try {
+      if (!isOffline) {
+        const res = await fetch(`/api/sessions/${id}`, { method: 'POST' });
+        if (res.ok) {
+          const cloned = await res.json();
+          const listRes = await fetch('/api/sessions');
+          setSessions(await listRes.json());
+          router.push(`/session/${cloned.id}`);
+          return;
+        }
+      }
+      throw new Error('offline or failed');
+    } catch {
+      // Offline clone — duplicate locally from IDB
+      const newSessionId = uuidv4();
+      const now = new Date().toISOString();
+
+      const sourceSession = await getSession(id);
+      if (!sourceSession) return;
+
+      await putSession({
+        id: newSessionId,
+        name: `${sourceSession.name} (copy)`,
+        createdAt: now,
+        updatedAt: now,
+        thumbnail: sourceSession.thumbnail,
+      });
+
+      const sourcePages = await getPagesBySession(id);
+      for (const sp of sourcePages) {
+        const newPageId = uuidv4();
+        const clonedPage: Page = {
+          id: newPageId,
+          sessionId: newSessionId,
+          position: sp.position,
+          backgroundPattern: sp.backgroundPattern,
+          backgroundColor: sp.backgroundColor,
+          strokes: sp.strokes.map(s => ({ ...s, id: uuidv4() })),
+        };
+        await putPage(clonedPage, Date.now());
+      }
+
+      // Queue pending action for server sync
+      await putPendingAction({
+        actionId: uuidv4(),
+        type: 'sessionCreate',
+        payload: JSON.stringify({ name: `${sourceSession.name} (copy)`, id: newSessionId, pageId: uuidv4() }),
+        createdAt: Date.now(),
+        status: 'pending',
+      });
+
+      // Try to sync immediately
+      fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: `${sourceSession.name} (copy)`, id: newSessionId }),
+      }).catch(() => {});
+
+      if (isOffline) {
+        setOfflineSessionId(newSessionId);
+        window.history.pushState(null, '', `/session/${newSessionId}`);
+      } else {
+        router.push(`/session/${newSessionId}`);
+      }
+    }
   };
 
   const startRename = (id: string, name: string) => {
@@ -300,15 +369,35 @@ export default function SessionList() {
 
   const commitRename = async () => {
     if (!editingId) return;
-    if (isOffline) { setEditingId(null); return; }
     const trimmed = editValue.trim();
     if (trimmed) {
-      await fetch(`/api/sessions/${editingId}`, {
+      // Update IDB immediately (works offline)
+      const session = await getSession(editingId);
+      if (session) {
+        await putSession({ ...session, name: trimmed, updatedAt: new Date().toISOString() });
+      }
+
+      // Update UI immediately
+      setSessions(prev => prev.map(s => s.id === editingId ? { ...s, name: trimmed } : s));
+
+      // Queue pending action for sync
+      const actionId = uuidv4();
+      await putPendingAction({
+        actionId,
+        type: 'sessionRename',
+        payload: JSON.stringify({ id: editingId, name: trimmed }),
+        createdAt: Date.now(),
+        status: 'pending',
+      });
+
+      // Try server sync immediately (non-blocking)
+      fetch(`/api/sessions/${editingId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: trimmed }),
-      });
-      setSessions(prev => prev.map(s => s.id === editingId ? { ...s, name: trimmed } : s));
+      }).then(async (res) => {
+        if (res.ok) await clearPendingAction(actionId);
+      }).catch(() => {});
     }
     setEditingId(null);
   };
