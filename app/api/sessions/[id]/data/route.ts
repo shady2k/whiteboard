@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import getDb from '@/app/lib/db';
+import { loadPagesWithStrokes } from '@/app/lib/apiHelpers';
 
 // GET /api/sessions/:id/data — lightweight JSON endpoint for background sync
 export async function GET(
@@ -21,20 +22,7 @@ export async function GET(
     'SELECT * FROM pages WHERE session_id = ? ORDER BY position'
   ).all(id) as Array<Record<string, unknown>>;
 
-  const pagesWithStrokes = pages.map((page) => {
-    const strokes = db.prepare(
-      'SELECT * FROM strokes WHERE page_id = ? ORDER BY z_order'
-    ).all(page.id as string) as Array<Record<string, unknown>>;
-
-    return {
-      ...page,
-      strokes: strokes.map((s) => ({
-        ...JSON.parse(s.data as string),
-        id: s.id,
-        type: s.type,
-      })),
-    };
-  });
+  const pagesWithStrokes = loadPagesWithStrokes(db, pages);
 
   return NextResponse.json({
     id: session.id,

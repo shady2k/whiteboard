@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import getDb from '@/app/lib/db';
 import { cleanupOrphanedAssets } from '@/app/lib/assetCleanup';
+import { tryClaimAction, completeAction, getPageAssetIds } from '@/app/lib/apiHelpers';
 
 // POST /api/strokes — save strokes (batch upsert)
 export async function POST(request: Request) {
@@ -33,18 +34,8 @@ export async function PUT(request: Request) {
   const db = getDb();
 
   // Atomic dedup: claim the action ID first
-  if (actionId) {
-    const inserted = db.prepare(
-      'INSERT OR IGNORE INTO action_log (action_id, type, result, created_at) VALUES (?, ?, NULL, ?)'
-    ).run(actionId, 'pageSync', new Date().toISOString());
-    if (inserted.changes === 0) {
-      const existing = db.prepare('SELECT result FROM action_log WHERE action_id = ?').get(actionId) as { result: string | null } | undefined;
-      if (existing?.result) {
-        return NextResponse.json(JSON.parse(existing.result));
-      }
-      return NextResponse.json({ error: 'Action in progress' }, { status: 409 });
-    }
-  }
+  const claimed = tryClaimAction(actionId, 'pageSync');
+  if (claimed) return claimed;
 
   // Revision check: if client sends expectedRevision, verify it matches
   if (expectedRevision !== undefined) {
@@ -65,11 +56,7 @@ export async function PUT(request: Request) {
   const now = new Date().toISOString();
 
   // Collect asset IDs referenced by old strokes before deleting
-  const oldAssetIds = (db.prepare(
-    "SELECT json_extract(data, '$.assetId') as assetId FROM strokes WHERE page_id = ? AND type = 'image'"
-  ).all(pageId) as Array<{ assetId: string | null }>)
-    .map(r => r.assetId)
-    .filter((id): id is string => id !== null);
+  const oldAssetIds = getPageAssetIds(pageId);
 
   const insert = db.prepare(
     'INSERT INTO strokes (id, page_id, type, data, z_order) VALUES (?, ?, ?, ?, ?)'
@@ -98,9 +85,7 @@ export async function PUT(request: Request) {
   const result = { ok: true, revision: newRevision };
 
   // Update action log with result
-  if (actionId) {
-    db.prepare('UPDATE action_log SET result = ? WHERE action_id = ?').run(JSON.stringify(result), actionId);
-  }
+  completeAction(actionId, result);
 
   return NextResponse.json(result);
 }

@@ -1,6 +1,7 @@
 'use client';
 
-import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
+import { useLatestRef } from '@/app/hooks/useLatestRef';
 import { Point, Stroke, FreehandStroke, MarkerStroke, ImageStroke, StrokeStyle, ToolType, BackgroundPattern, Snippet } from '@/app/types';
 import { drawFreehandPoints, drawMarkerPoints } from '@/app/utils/drawStroke';
 import { renderStroke, renderAllStrokes } from '@/app/utils/renderStroke';
@@ -8,7 +9,9 @@ import { drawLinePreview, drawRectPreview, drawEllipsePreview, drawTrianglePrevi
 import { drawBackground } from '@/app/utils/drawGrid';
 import { snapLineEnd, snapRectEnd, snapEllipseEnd } from '@/app/utils/snapShape';
 import { getCachedImage } from '@/app/utils/imageCache';
-import { strokeIntersectsRect } from '@/app/utils/strokeBounds';
+import { strokeIntersectsRect, findStrokeAtPoint as findStrokeAtPointUtil } from '@/app/utils/strokeBounds';
+import { offsetStroke } from '@/app/utils/strokeTransform';
+import { useImageDrag } from '@/app/hooks/useImageDrag';
 import { v4 as uuidv4 } from 'uuid';
 
 interface CanvasProps {
@@ -30,8 +33,6 @@ interface CanvasProps {
   onPasteConfirm?: (targetX: number, targetY: number) => void;
   selectionActive?: boolean;
 }
-
-type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se';
 
 export default function Canvas({
   strokes,
@@ -69,51 +70,22 @@ export default function Canvas({
   const panOffsetStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const spaceHeldRef = useRef(false);
 
-  // Image drag state
-  const selectedImageRef = useRef<ImageStroke | null>(null);
-  const dragHandleRef = useRef<DragHandle | null>(null);
-  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
-  const dragOriginalRef = useRef<ImageStroke | null>(null);
-  const draggingImageIdRef = useRef<string | null>(null);
-
-  // Image selection UI state
-  const [selectedImage, setSelectedImage] = useState<ImageStroke | null>(null);
-  const [lockProportions, setLockProportions] = useState(true);
-  const [isDragging, setIsDragging] = useState(false);
-
-  const activeToolRef = useRef(activeTool);
-  const strokeStyleRef = useRef(strokeStyle);
-  const strokesRef = useRef(strokes);
-  const bgPatternRef = useRef(backgroundPattern);
-  const bgColorRef = useRef(backgroundColor);
-  const scaleRef = useRef(scale);
-  const onStrokeCompleteRef = useRef(onStrokeComplete);
-  const onStrokeDeleteRef = useRef(onStrokeDelete);
-  const onImageTransformRef = useRef(onImageTransform);
-  const onToolChangeRef = useRef(onToolChange);
-  const onZoomChangeRef = useRef(onZoomChange);
-  const onPanChangeRef = useRef(onPanChange);
-  const panOffsetRef = useRef(panOffset);
-  const onSelectionCompleteRef = useRef(onSelectionComplete);
-  const onPasteConfirmRef = useRef(onPasteConfirm);
-  const pastePreviewRef = useRef(pastePreview);
-
-  useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
-  useEffect(() => { strokeStyleRef.current = strokeStyle; }, [strokeStyle]);
-  useEffect(() => { strokesRef.current = strokes; }, [strokes]);
-  useEffect(() => { bgPatternRef.current = backgroundPattern; }, [backgroundPattern]);
-  useEffect(() => { bgColorRef.current = backgroundColor; }, [backgroundColor]);
-  useEffect(() => { scaleRef.current = scale; }, [scale]);
-  useEffect(() => { onStrokeCompleteRef.current = onStrokeComplete; }, [onStrokeComplete]);
-  useEffect(() => { onStrokeDeleteRef.current = onStrokeDelete; }, [onStrokeDelete]);
-  useEffect(() => { onImageTransformRef.current = onImageTransform; }, [onImageTransform]);
-  useEffect(() => { onToolChangeRef.current = onToolChange; }, [onToolChange]);
-  useEffect(() => { onZoomChangeRef.current = onZoomChange; }, [onZoomChange]);
-  useEffect(() => { onPanChangeRef.current = onPanChange; }, [onPanChange]);
-  useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
-  useEffect(() => { onSelectionCompleteRef.current = onSelectionComplete; }, [onSelectionComplete]);
-  useEffect(() => { onPasteConfirmRef.current = onPasteConfirm; }, [onPasteConfirm]);
-  useEffect(() => { pastePreviewRef.current = pastePreview; }, [pastePreview]);
+  const activeToolRef = useLatestRef(activeTool);
+  const strokeStyleRef = useLatestRef(strokeStyle);
+  const strokesRef = useLatestRef(strokes);
+  const bgPatternRef = useLatestRef(backgroundPattern);
+  const bgColorRef = useLatestRef(backgroundColor);
+  const scaleRef = useLatestRef(scale);
+  const onStrokeCompleteRef = useLatestRef(onStrokeComplete);
+  const onStrokeDeleteRef = useLatestRef(onStrokeDelete);
+  const onImageTransformRef = useLatestRef(onImageTransform);
+  const onToolChangeRef = useLatestRef(onToolChange);
+  const onZoomChangeRef = useLatestRef(onZoomChange);
+  const onPanChangeRef = useLatestRef(onPanChange);
+  const panOffsetRef = useLatestRef(panOffset);
+  const onSelectionCompleteRef = useLatestRef(onSelectionComplete);
+  const onPasteConfirmRef = useLatestRef(onPasteConfirm);
+  const pastePreviewRef = useLatestRef(pastePreview);
 
   const getCtx = useCallback((canvas: HTMLCanvasElement | null): CanvasRenderingContext2D | null => {
     return canvas?.getContext('2d') ?? null;
@@ -191,44 +163,38 @@ export default function Canvas({
     ctx.clearRect(0, 0, w, h);
   }, [getCtx, getViewportSize]);
 
-  // Draw selection handles for selected image
-  const drawImageSelection = useCallback((ctx: CanvasRenderingContext2D, img: ImageStroke) => {
-    const { panX, panY, scale: s } = getTransform();
-    ctx.save();
-    ctx.translate(panX, panY);
-    ctx.scale(s, s);
-
-    const { x, y, width, height } = img;
-    // Selection border
-    ctx.strokeStyle = '#3b82f6';
-    ctx.lineWidth = 2 / s;
-    ctx.setLineDash([6 / s, 3 / s]);
-    ctx.strokeRect(x, y, width, height);
-    ctx.setLineDash([]);
-
-    // Resize handles
-    const handleSize = 8 / s;
-    ctx.fillStyle = '#3b82f6';
-    const handles = [
-      { hx: x, hy: y },
-      { hx: x + width, hy: y },
-      { hx: x, hy: y + height },
-      { hx: x + width, hy: y + height },
-    ];
-    for (const h of handles) {
-      ctx.fillRect(h.hx - handleSize / 2, h.hy - handleSize / 2, handleSize, handleSize);
-    }
-
-    // Opacity indicator
-    const opacity = img.opacity ?? 1;
-    if (opacity < 1) {
-      ctx.fillStyle = '#fff';
-      ctx.font = `${12 / s}px sans-serif`;
-      ctx.fillText(`${Math.round(opacity * 100)}%`, x, y - 6 / s);
-    }
-
-    ctx.restore();
-  }, [getTransform]);
+  const {
+    selectedImageRef,
+    dragHandleRef,
+    dragStartRef,
+    dragOriginalRef,
+    draggingImageIdRef,
+    selectedImage,
+    setSelectedImage,
+    lockProportions,
+    setLockProportions,
+    isDragging,
+    setIsDragging,
+    lockProportionsRef,
+    findImageAtPoint,
+    drawImageSelection,
+    handleOpacityChange,
+    handleDeleteImage,
+    selPos,
+  } = useImageDrag({
+    getTransform,
+    scaleRef,
+    strokesRef,
+    strokes,
+    scale,
+    panOffset,
+    activeTool,
+    onStrokeDeleteRef,
+    onImageTransformRef,
+    clearPreview,
+    getCtx,
+    previewCanvasRef,
+  });
 
   // Init + resize
   useEffect(() => {
@@ -286,47 +252,12 @@ export default function Canvas({
     return () => document.removeEventListener('wheel', handleWheel);
   }, []);
 
-  // Delete selected image with Delete/Backspace key
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedImageRef.current) {
-        e.preventDefault();
-        if (onStrokeDeleteRef.current) {
-          onStrokeDeleteRef.current(selectedImageRef.current.id);
-        }
-        selectedImageRef.current = null;
-        queueMicrotask(() => setSelectedImage(null));
-        clearPreview();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [clearPreview]);
-
   // Clear preview when selection is dismissed
   useEffect(() => {
     if (selectionActive === false && activeTool === 'select') {
       clearPreview();
     }
   }, [selectionActive, activeTool, clearPreview]);
-
-  // Deselect image when tool changes away from hand
-  useEffect(() => {
-    if (activeTool !== 'hand') {
-      selectedImageRef.current = null;
-      queueMicrotask(() => setSelectedImage(null));
-      clearPreview();
-    }
-  }, [activeTool, clearPreview]);
-
-  // Clear selection when selected image is removed from strokes (e.g. undo)
-  useEffect(() => {
-    if (selectedImage && !strokes.find(s => s.id === selectedImage.id)) {
-      selectedImageRef.current = null;
-      queueMicrotask(() => setSelectedImage(null));
-      clearPreview();
-    }
-  }, [strokes, selectedImage, clearPreview]);
 
   // Helper to get canvas-space point from pointer event (used inline below)
   const getPoint = useCallback((e: PointerEvent): Point => {
@@ -360,7 +291,7 @@ export default function Canvas({
         const offsetX = point.x - pastePreview.width / 2;
         const offsetY = point.y - pastePreview.height / 2;
         for (const stroke of pastePreview.strokes) {
-          const shifted = offsetStrokeForPreview(stroke, offsetX, offsetY);
+          const shifted = offsetStroke(stroke, offsetX, offsetY);
           renderStroke(ctx, shifted);
         }
         ctx.globalAlpha = 1;
@@ -377,83 +308,10 @@ export default function Canvas({
     return () => canvas.removeEventListener('pointermove', onMove);
   }, [pastePreview, activeTool, getPoint, getCtx, getTransform, clearPreview]);
 
-  // Find image stroke at point and which handle (if any)
-  const findImageAtPoint = useCallback((p: Point): { stroke: ImageStroke; handle: DragHandle } | null => {
-    const s = scaleRef.current;
-    const handleSize = 12 / s;
-    for (let i = strokesRef.current.length - 1; i >= 0; i--) {
-      const stroke = strokesRef.current[i];
-      if (stroke.type !== 'image') continue;
-      const { x, y, width, height } = stroke;
-
-      const corners: { hx: number; hy: number; handle: DragHandle }[] = [
-        { hx: x, hy: y, handle: 'nw' },
-        { hx: x + width, hy: y, handle: 'ne' },
-        { hx: x, hy: y + height, handle: 'sw' },
-        { hx: x + width, hy: y + height, handle: 'se' },
-      ];
-      for (const c of corners) {
-        if (Math.abs(p.x - c.hx) < handleSize && Math.abs(p.y - c.hy) < handleSize) {
-          return { stroke, handle: c.handle };
-        }
-      }
-
-      if (p.x >= x && p.x <= x + width && p.y >= y && p.y <= y + height) {
-        return { stroke, handle: 'move' };
-      }
-    }
-    return null;
-  }, []);
-
   const findStrokeAtPoint = useCallback((p: Point): string | null => {
     const eraserRadius = 10 / scaleRef.current;
-    for (let i = strokesRef.current.length - 1; i >= 0; i--) {
-      const stroke = strokesRef.current[i];
-      if (stroke.type === 'freehand' || stroke.type === 'marker') {
-        for (const sp of stroke.points) {
-          const dx = sp.x - p.x;
-          const dy = sp.y - p.y;
-          if (dx * dx + dy * dy < eraserRadius * eraserRadius) return stroke.id;
-        }
-      } else if (stroke.type === 'line') {
-        if (distPointToSegment(p, stroke.start, stroke.end) < eraserRadius) return stroke.id;
-      } else if (stroke.type === 'rect') {
-        const s = stroke;
-        const corners = [s.start, { ...s.start, x: s.end.x }, s.end, { ...s.end, x: s.start.x }] as Point[];
-        for (let j = 0; j < 4; j++) {
-          if (distPointToSegment(p, corners[j], corners[(j + 1) % 4]) < eraserRadius) return stroke.id;
-        }
-      } else if (stroke.type === 'triangle') {
-        const s = stroke;
-        const x = Math.min(s.start.x, s.end.x);
-        const y = Math.min(s.start.y, s.end.y);
-        const w = Math.abs(s.end.x - s.start.x);
-        const h = Math.abs(s.end.y - s.start.y);
-        const tri = [
-          { x: x + w / 2, y, pressure: 0 },
-          { x: x + w, y: y + h, pressure: 0 },
-          { x, y: y + h, pressure: 0 },
-        ] as Point[];
-        for (let j = 0; j < 3; j++) {
-          if (distPointToSegment(p, tri[j], tri[(j + 1) % 3]) < eraserRadius) return stroke.id;
-        }
-      } else if (stroke.type === 'ellipse') {
-        const s = stroke;
-        const dx = (p.x - s.center.x) / s.radiusX;
-        const dy = (p.y - s.center.y) / s.radiusY;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (Math.abs(d - 1) < eraserRadius / Math.min(s.radiusX, s.radiusY)) return stroke.id;
-      } else if (stroke.type === 'image') {
-        const { x, y, width, height } = stroke;
-        if (p.x >= x && p.x <= x + width && p.y >= y && p.y <= y + height) return stroke.id;
-      }
-    }
-    return null;
+    return findStrokeAtPointUtil(p, strokesRef.current, eraserRadius);
   }, []);
-
-  // Lock proportions ref for use in pointer handler
-  const lockProportionsRef = useRef(lockProportions);
-  useEffect(() => { lockProportionsRef.current = lockProportions; }, [lockProportions]);
 
   // Pointer events
   useEffect(() => {
@@ -910,43 +768,6 @@ export default function Canvas({
   }, [getPoint, getCtx, getViewportSize, getTransform, clearPreview, findStrokeAtPoint, findImageAtPoint, drawImageSelection, redrawBackground, redrawInk]);
 
 
-  // Handle opacity change for selected image
-  const handleOpacityChange = useCallback((opacity: number) => {
-    if (!selectedImage) return;
-    const updated = { ...selectedImage, opacity };
-    selectedImageRef.current = updated;
-    setSelectedImage(updated);
-    if (onImageTransformRef.current) {
-      onImageTransformRef.current(selectedImage.id, updated);
-    }
-    clearPreview();
-    const ctx = getCtx(previewCanvasRef.current);
-    if (ctx) drawImageSelection(ctx, updated);
-  }, [selectedImage, clearPreview, getCtx, drawImageSelection]);
-
-  // Handle delete selected image
-  const handleDeleteImage = useCallback(() => {
-    if (!selectedImage) return;
-    if (onStrokeDeleteRef.current) {
-      onStrokeDeleteRef.current(selectedImage.id);
-    }
-    selectedImageRef.current = null;
-    setSelectedImage(null);
-    clearPreview();
-  }, [selectedImage, clearPreview]);
-
-  // Compute screen position for floating controls using props directly (not refs)
-  const selPos = useMemo(() => {
-    if (!selectedImage) return null;
-    const w = typeof window !== 'undefined' ? window.innerWidth : 0;
-    const h = typeof window !== 'undefined' ? window.innerHeight : 0;
-    const panX = (w / 2) * (1 - scale) + panOffset.x;
-    const panY = (h / 2) * (1 - scale) + panOffset.y;
-    const screenX = selectedImage.x * scale + panX;
-    const screenY = (selectedImage.y + selectedImage.height) * scale + panY + 8;
-    return { x: screenX, y: screenY };
-  }, [selectedImage, scale, panOffset]);
-
   const cursorClass = activeTool === 'hand' ? 'cursor-grab' : activeTool === 'select' && pastePreview ? 'cursor-copy' : 'cursor-crosshair';
 
   return (
@@ -1016,34 +837,3 @@ export default function Canvas({
   );
 }
 
-function offsetStrokeForPreview(stroke: Stroke, dx: number, dy: number): Stroke {
-  switch (stroke.type) {
-    case 'freehand':
-    case 'marker':
-      return { ...stroke, points: stroke.points.map(p => ({ x: p.x + dx, y: p.y + dy, pressure: p.pressure })) };
-    case 'line':
-    case 'rect':
-    case 'triangle':
-      return {
-        ...stroke,
-        start: { x: stroke.start.x + dx, y: stroke.start.y + dy, pressure: stroke.start.pressure },
-        end: { x: stroke.end.x + dx, y: stroke.end.y + dy, pressure: stroke.end.pressure },
-      };
-    case 'ellipse':
-      return { ...stroke, center: { x: stroke.center.x + dx, y: stroke.center.y + dy, pressure: stroke.center.pressure } };
-    case 'image':
-      return { ...stroke, x: stroke.x + dx, y: stroke.y + dy };
-  }
-}
-
-function distPointToSegment(p: Point, a: Point, b: Point): number {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0) return Math.sqrt((p.x - a.x) ** 2 + (p.y - a.y) ** 2);
-  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
-  t = Math.max(0, Math.min(1, t));
-  const projX = a.x + t * dx;
-  const projY = a.y + t * dy;
-  return Math.sqrt((p.x - projX) ** 2 + (p.y - projY) ** 2);
-}

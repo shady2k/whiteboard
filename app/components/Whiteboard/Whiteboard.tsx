@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { Stroke, ToolType, StrokeStyle, Command, Page, BackgroundPattern, ImageStroke, Snippet } from '@/app/types';
+import { Stroke, ToolType, StrokeStyle, Page, BackgroundPattern, ImageStroke, Snippet } from '@/app/types';
 import Canvas from '@/app/components/Canvas/Canvas';
 import Toolbar from '@/app/components/Toolbar/Toolbar';
 import PageNav from '@/app/components/PageNav/PageNav';
@@ -10,38 +10,13 @@ import SnippetPanel from '@/app/components/SnippetPanel';
 import { useIDBState } from '@/app/hooks/useIDBState';
 import { useSyncEngine } from '@/app/hooks/useSyncEngine';
 import { useSnippetSync } from '@/app/hooks/useSnippetSync';
-import { saveUndoHistory, loadUndoHistory, putAsset, getSession, putSession } from '@/app/lib/idb';
-import { v4 as uuidv4 } from 'uuid';
-import { exportPageAsPng, exportAllPagesAsPdf, downloadBlob } from '@/app/utils/exportPage';
+import { useUndoRedo } from '@/app/hooks/useUndoRedo';
+import { getSession, putSession } from '@/app/lib/idb';
+import { useFileOperations } from '@/app/hooks/useFileOperations';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { renderAllStrokes } from '@/app/utils/renderStroke';
 import { createSnippet, denormalizeStrokes, generateSnippetThumbnail, normalizeStrokes } from '@/app/utils/snippetUtils';
 import Image from 'next/image';
-
-async function loadPdfDocument(file: File | Blob): Promise<import('pdfjs-dist').PDFDocumentProxy> {
-  const pdfjsLib = await import('pdfjs-dist');
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
-  const arrayBuffer = file instanceof File ? await file.arrayBuffer() : await file.arrayBuffer();
-  return pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-}
-
-function getImageDimensions(url: string): Promise<{ width: number; height: number }> {
-  return new Promise((resolve) => {
-    const img = new globalThis.Image();
-    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-    img.onerror = () => resolve({ width: 400, height: 300 });
-    img.src = url;
-  });
-}
-
-async function computeContentHash(blob: Blob): Promise<string> {
-  const slice = blob.slice(0, 65536);
-  const buf = await slice.arrayBuffer();
-  const hash = await crypto.subtle.digest('SHA-256', buf);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
 
 interface WhiteboardProps {
   sessionId: string;
@@ -85,37 +60,11 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
   const strokes = useMemo(() => page?.strokes ?? [], [page?.strokes]);
 
-  // Undo/redo stacks
-  const [undoStack, setUndoStack] = useState<Command[]>([]);
-  const [redoStack, setRedoStack] = useState<Command[]>([]);
-
   const strokesRef = useRef(strokes);
   useEffect(() => { strokesRef.current = strokes; }, [strokes]);
 
   const pageRef = useRef(page);
   useEffect(() => { pageRef.current = page; }, [page]);
-
-  // Restore undo history from IDB on mount
-  useEffect(() => {
-    loadUndoHistory(sessionId).then((history) => {
-      if (history) {
-        setUndoStack(history.undoStack);
-        setRedoStack(history.redoStack);
-      }
-    }).catch(() => {});
-  }, [sessionId]);
-
-  // Persist undo history to IDB (debounced)
-  const undoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    if (undoSaveTimerRef.current) clearTimeout(undoSaveTimerRef.current);
-    undoSaveTimerRef.current = setTimeout(() => {
-      saveUndoHistory(sessionId, undoStack, redoStack).catch(() => {});
-    }, 1000);
-    return () => {
-      if (undoSaveTimerRef.current) clearTimeout(undoSaveTimerRef.current);
-    };
-  }, [sessionId, undoStack, redoStack]);
 
   // Generate and save thumbnail
   const thumbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -173,10 +122,14 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     });
   }, [setPage]);
 
-  const pushCommand = useCallback((cmd: Command) => {
-    setUndoStack(prev => [...prev, cmd]);
-    setRedoStack([]);
-  }, []);
+  const { pushCommand, undo, redo, canUndo, canRedo } = useUndoRedo({
+    sessionId,
+    updatePageStrokes,
+    setPage,
+    queuePageSync,
+    queueBackgroundSync,
+    pageRef,
+  });
 
   const handleStrokeComplete = useCallback((stroke: Stroke) => {
     const pageId = page?.id;
@@ -185,6 +138,13 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     pushCommand({ type: 'createStroke', pageId, stroke });
     setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
   }, [page?.id, updatePageStrokes, pushCommand, queuePageSync]);
+
+  const { handleImportFile, handleExportPng, handleExportPdf, pdfPageDialog, setPdfPageDialog, importPdfPages } = useFileOperations({
+    page,
+    strokes,
+    sessionName,
+    handleStrokeComplete,
+  });
 
   const handleStrokeDelete = useCallback((strokeId: string) => {
     const pageId = page?.id;
@@ -195,93 +155,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     pushCommand({ type: 'deleteStroke', pageId, strokeId, stroke });
     setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
   }, [page?.id, strokes, updatePageStrokes, pushCommand, queuePageSync]);
-
-  const undo = useCallback(() => {
-    setUndoStack(prev => {
-      if (prev.length === 0) return prev;
-      const cmd = prev[prev.length - 1];
-      const rest = prev.slice(0, -1);
-
-      switch (cmd.type) {
-        case 'createStroke':
-        case 'pasteImage':
-          updatePageStrokes(cmd.pageId, s => s.filter(st => st.id !== cmd.stroke.id));
-          break;
-        case 'deleteStroke':
-          updatePageStrokes(cmd.pageId, s => [...s, cmd.stroke]);
-          break;
-        case 'clearPage':
-          updatePageStrokes(cmd.pageId, () => cmd.strokes);
-          break;
-        case 'setPageBackground':
-          setPage(p => p.id === cmd.pageId
-            ? { ...p, backgroundPattern: cmd.oldPattern, backgroundColor: cmd.oldColor }
-            : p
-          );
-          // Background change via sync engine
-          setTimeout(() => { if (pageRef.current) queueBackgroundSync(pageRef.current); }, 0);
-          break;
-        case 'transformImageStroke':
-          updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.oldStroke : st));
-          break;
-        case 'pasteSnippet': {
-          const ids = new Set(cmd.strokes.map(s => s.id));
-          updatePageStrokes(cmd.pageId, s => s.filter(st => !ids.has(st.id)));
-          break;
-        }
-        case 'deleteSelected':
-          updatePageStrokes(cmd.pageId, s => [...s, ...cmd.strokes]);
-          break;
-      }
-
-      setRedoStack(r => [...r, cmd]);
-      setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
-      return rest;
-    });
-  }, [updatePageStrokes, setPage, queuePageSync, queueBackgroundSync]);
-
-  const redo = useCallback(() => {
-    setRedoStack(prev => {
-      if (prev.length === 0) return prev;
-      const cmd = prev[prev.length - 1];
-      const rest = prev.slice(0, -1);
-
-      switch (cmd.type) {
-        case 'createStroke':
-        case 'pasteImage':
-          updatePageStrokes(cmd.pageId, s => [...s, cmd.stroke]);
-          break;
-        case 'deleteStroke':
-          updatePageStrokes(cmd.pageId, s => s.filter(st => st.id !== cmd.strokeId));
-          break;
-        case 'clearPage':
-          updatePageStrokes(cmd.pageId, () => []);
-          break;
-        case 'setPageBackground':
-          setPage(p => p.id === cmd.pageId
-            ? { ...p, backgroundPattern: cmd.newPattern, backgroundColor: cmd.newColor }
-            : p
-          );
-          setTimeout(() => { if (pageRef.current) queueBackgroundSync(pageRef.current); }, 0);
-          break;
-        case 'transformImageStroke':
-          updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.newStroke : st));
-          break;
-        case 'pasteSnippet':
-          updatePageStrokes(cmd.pageId, s => [...s, ...cmd.strokes]);
-          break;
-        case 'deleteSelected': {
-          const ids = new Set(cmd.strokes.map(s => s.id));
-          updatePageStrokes(cmd.pageId, s => s.filter(st => !ids.has(st.id)));
-          break;
-        }
-      }
-
-      setUndoStack(u => [...u, cmd]);
-      setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
-      return rest;
-    });
-  }, [updatePageStrokes, setPage, queuePageSync, queueBackgroundSync]);
 
   const handleBackgroundPatternChange = useCallback(async (pattern: BackgroundPattern) => {
     const pageId = page?.id;
@@ -338,8 +211,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const pasteFromClipboardRef = useRef<(() => void) | null>(null);
   const clipboardRef = useRef<Stroke[] | null>(null);
   const pendingSelectionRef = useRef(pendingSelection);
-
-  const [pdfPageDialog, setPdfPageDialog] = useState<{ pdf: import('pdfjs-dist').PDFDocumentProxy; numPages: number } | null>(null);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -432,194 +303,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo, zoomIn, zoomOut, zoomReset]);
-
-  // Upload image — offline-capable with stable local IDs
-  const uploadAndCreateImageStroke = useCallback(async (file: File | Blob, mimeType?: string): Promise<ImageStroke | null> => {
-    const pageId = page?.id;
-    if (!pageId) return null;
-
-    try {
-      // Generate stable local ID
-      const localAssetId = `local-${uuidv4()}`;
-      const blob = file instanceof Blob ? file : file;
-      const contentHash = await computeContentHash(blob);
-
-      // Store blob in IDB
-      await putAsset({
-        id: localAssetId,
-        blob,
-        mimeType: mimeType || file.type || 'image/png',
-        cachedAt: Date.now(),
-        pendingUpload: true,
-        contentHash,
-      });
-
-      const url = URL.createObjectURL(file);
-      const dims = await getImageDimensions(url);
-      URL.revokeObjectURL(url);
-
-      const maxW = window.innerWidth * 0.6;
-      const maxH = window.innerHeight * 0.6;
-      let w = dims.width;
-      let h = dims.height;
-      if (w > maxW) { h *= maxW / w; w = maxW; }
-      if (h > maxH) { w *= maxH / h; h = maxH; }
-
-      const x = (window.innerWidth - w) / 2;
-      const y = (window.innerHeight - h) / 2;
-
-      const stroke: ImageStroke = {
-        type: 'image',
-        id: uuidv4(),
-        assetId: localAssetId,
-        x, y,
-        width: w,
-        height: h,
-      };
-
-      return stroke;
-    } catch (e) {
-      console.error('Failed to create image stroke:', e);
-      return null;
-    }
-  }, [page?.id]);
-
-  // Clipboard paste handler
-  useEffect(() => {
-    const handlePaste = async (e: ClipboardEvent) => {
-      const items = e.clipboardData?.items;
-      if (!items) return;
-
-      for (const item of Array.from(items)) {
-        if (item.type.startsWith('image/')) {
-          e.preventDefault();
-          const blob = item.getAsFile();
-          if (!blob) continue;
-
-          const stroke = await uploadAndCreateImageStroke(blob);
-          if (stroke) {
-            handleStrokeComplete(stroke);
-          }
-          return;
-        }
-      }
-    };
-
-    document.addEventListener('paste', handlePaste);
-    return () => document.removeEventListener('paste', handlePaste);
-  }, [uploadAndCreateImageStroke, handleStrokeComplete]);
-
-  // Import selected PDF pages as image strokes
-  const importPdfPages = useCallback(async (pdf: import('pdfjs-dist').PDFDocumentProxy, pageNumbers: number[]) => {
-    for (let idx = 0; idx < pageNumbers.length; idx++) {
-      const pageNum = pageNumbers[idx];
-      const pdfPage = await pdf.getPage(pageNum);
-      const viewport = pdfPage.getViewport({ scale: 2 });
-
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const ctx = canvas.getContext('2d')!;
-
-      await pdfPage.render({ canvasContext: ctx, viewport, canvas } as never).promise;
-
-      const blob = await new Promise<Blob>((resolve) =>
-        canvas.toBlob(b => resolve(b!), 'image/png')
-      );
-
-      const stroke = await uploadAndCreateImageStroke(blob, 'image/png');
-      if (stroke) {
-        if (idx > 0) {
-          stroke.y = stroke.y + idx * (stroke.height + 20);
-        }
-        handleStrokeComplete(stroke);
-      }
-    }
-  }, [uploadAndCreateImageStroke, handleStrokeComplete]);
-
-  // File import handler (images + PDFs)
-  const handleImportFile = useCallback(async () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*,.pdf,application/pdf';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-
-      if (file.type.startsWith('image/')) {
-        const stroke = await uploadAndCreateImageStroke(file);
-        if (stroke) handleStrokeComplete(stroke);
-        return;
-      }
-
-      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-        try {
-          const pdf = await loadPdfDocument(file);
-
-          if (pdf.numPages === 1) {
-            await importPdfPages(pdf, [1]);
-          } else {
-            setPdfPageDialog({ pdf, numPages: pdf.numPages });
-          }
-        } catch (e) {
-          console.error('Failed to import PDF:', e);
-          alert('Failed to import PDF. Please try again.');
-        }
-      }
-    };
-    input.click();
-  }, [uploadAndCreateImageStroke, handleStrokeComplete, importPdfPages]);
-
-  // Drag and drop handler
-  useEffect(() => {
-    const handleDragOver = (e: DragEvent) => {
-      e.preventDefault();
-      e.dataTransfer!.dropEffect = 'copy';
-    };
-
-    const handleDrop = async (e: DragEvent) => {
-      e.preventDefault();
-      const files = e.dataTransfer?.files;
-      if (!files?.length) return;
-
-      for (const file of Array.from(files)) {
-        if (file.type.startsWith('image/')) {
-          const stroke = await uploadAndCreateImageStroke(file);
-          if (stroke) handleStrokeComplete(stroke);
-        } else if (file.type === 'application/pdf') {
-          try {
-            const pdf = await loadPdfDocument(file);
-
-            if (pdf.numPages === 1) {
-              await importPdfPages(pdf, [1]);
-            } else {
-              setPdfPageDialog({ pdf, numPages: pdf.numPages });
-            }
-          } catch (err) {
-            console.error('PDF drop import failed:', err);
-          }
-        }
-      }
-    };
-
-    document.addEventListener('dragover', handleDragOver);
-    document.addEventListener('drop', handleDrop);
-    return () => {
-      document.removeEventListener('dragover', handleDragOver);
-      document.removeEventListener('drop', handleDrop);
-    };
-  }, [uploadAndCreateImageStroke, handleStrokeComplete, importPdfPages]);
-
-  const handleExportPng = useCallback(async () => {
-    if (!page) return;
-    const blob = await exportPageAsPng(strokes, page.backgroundPattern, page.backgroundColor);
-    downloadBlob(blob, `${sessionName}.png`);
-  }, [page, strokes, sessionName]);
-
-  const handleExportPdf = useCallback(async () => {
-    if (!page) return;
-    await exportAllPagesAsPdf([page], sessionName);
-  }, [page, sessionName]);
 
   useEffect(() => { handleExportPngRef.current = handleExportPng; }, [handleExportPng]);
   useEffect(() => { handleExportPdfRef.current = handleExportPdf; }, [handleExportPdf]);
@@ -813,8 +496,8 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         onShowCheatsheet={() => setShowCheatsheet(true)}
         onSnippetPanelToggle={() => setSnippetPanelOpen(v => !v)}
         snippetPanelOpen={snippetPanelOpen}
-        canUndo={undoStack.length > 0}
-        canRedo={redoStack.length > 0}
+        canUndo={canUndo}
+        canRedo={canRedo}
       />
       <PageNav
         sessionName={sessionName}

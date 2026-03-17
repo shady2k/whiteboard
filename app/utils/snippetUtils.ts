@@ -1,5 +1,6 @@
 import type { Stroke, Snippet } from '@/app/types';
 import { getStrokeBounds, type BoundingBox } from './strokeBounds';
+import { offsetStroke as baseOffsetStroke } from './strokeTransform';
 import { renderAllStrokes } from './renderStroke';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -15,40 +16,14 @@ function getCombinedBounds(strokes: Stroke[]): BoundingBox {
   return { minX, minY, maxX, maxY };
 }
 
-function offsetStroke(stroke: Stroke, dx: number, dy: number): Stroke {
-  const id = uuidv4();
-  switch (stroke.type) {
-    case 'freehand':
-    case 'marker':
-      return {
-        ...stroke,
-        id,
-        points: stroke.points.map(p => ({ x: p.x + dx, y: p.y + dy, pressure: p.pressure })),
-      };
-    case 'line':
-    case 'rect':
-    case 'triangle':
-      return {
-        ...stroke,
-        id,
-        start: { x: stroke.start.x + dx, y: stroke.start.y + dy, pressure: stroke.start.pressure },
-        end: { x: stroke.end.x + dx, y: stroke.end.y + dy, pressure: stroke.end.pressure },
-      };
-    case 'ellipse':
-      return {
-        ...stroke,
-        id,
-        center: { x: stroke.center.x + dx, y: stroke.center.y + dy, pressure: stroke.center.pressure },
-      };
-    case 'image':
-      return { ...stroke, id, x: stroke.x + dx, y: stroke.y + dy };
-  }
+function offsetStrokeWithNewId(stroke: Stroke, dx: number, dy: number): Stroke {
+  return { ...baseOffsetStroke(stroke, dx, dy), id: uuidv4() };
 }
 
 export function normalizeStrokes(strokes: Stroke[]): { normalized: Stroke[]; width: number; height: number } {
   if (strokes.length === 0) return { normalized: [], width: 0, height: 0 };
   const bounds = getCombinedBounds(strokes);
-  const normalized = strokes.map(s => offsetStroke(s, -bounds.minX, -bounds.minY));
+  const normalized = strokes.map(s => offsetStrokeWithNewId(s, -bounds.minX, -bounds.minY));
   return {
     normalized,
     width: bounds.maxX - bounds.minX,
@@ -57,7 +32,7 @@ export function normalizeStrokes(strokes: Stroke[]): { normalized: Stroke[]; wid
 }
 
 export function denormalizeStrokes(strokes: Stroke[], targetX: number, targetY: number): Stroke[] {
-  return strokes.map(s => offsetStroke(s, targetX, targetY));
+  return strokes.map(s => offsetStrokeWithNewId(s, targetX, targetY));
 }
 
 export function generateSnippetThumbnail(strokes: Stroke[], width: number, height: number): string {

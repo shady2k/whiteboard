@@ -1,7 +1,8 @@
 'use client';
 
-import { useRef, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { useRef, useCallback, useEffect, useState } from 'react';
 import type { Page, Stroke } from '@/app/types';
+import { useOnlineStatus } from './useOnlineStatus';
 import { v4 as uuidv4 } from 'uuid';
 import {
   clearDirty,
@@ -14,6 +15,7 @@ import {
   putAsset,
   putPage,
 } from '@/app/lib/idb';
+import { replaySessionActions } from '@/app/lib/replayPendingActions';
 
 const MAX_RETRIES = 8;
 const BASE_DELAY = 500;
@@ -135,18 +137,7 @@ async function uploadPendingAssetsForPage(
 }
 
 export function useSyncEngine(sessionId: string) {
-  const isOnline = useSyncExternalStore(
-    (cb) => {
-      window.addEventListener('online', cb);
-      window.addEventListener('offline', cb);
-      return () => {
-        window.removeEventListener('online', cb);
-        window.removeEventListener('offline', cb);
-      };
-    },
-    () => navigator.onLine,
-    () => true
-  );
+  const isOnline = useOnlineStatus();
   const [isSyncing, setIsSyncing] = useState(false);
 
   const pageSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -299,57 +290,7 @@ export function useSyncEngine(sessionId: string) {
       }
 
       // Retry any crashed pending actions
-      if (navigator.onLine) {
-        const pending = await getPendingActions();
-        for (const action of pending) {
-          if (action.type === 'sessionCreate') {
-            // Replay session creation
-            try {
-              const payload = JSON.parse(action.payload);
-              const res = await fetch('/api/sessions', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-              });
-              if (res.ok || res.status < 500) {
-                await clearPendingAction(action.actionId);
-              }
-            } catch {
-              // Will retry on next flush
-            }
-          } else if (action.type === 'sessionDelete') {
-            // Replay session deletion
-            try {
-              const payload = JSON.parse(action.payload);
-              const res = await fetch(`/api/sessions/${payload.id}`, {
-                method: 'DELETE',
-              });
-              if (res.ok || res.status < 500) {
-                await clearPendingAction(action.actionId);
-              }
-            } catch {
-              // Will retry on next flush
-            }
-          } else if (action.type === 'sessionRename') {
-            try {
-              const payload = JSON.parse(action.payload);
-              const res = await fetch(`/api/sessions/${payload.id}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: payload.name }),
-              });
-              if (res.ok || res.status < 500) {
-                await clearPendingAction(action.actionId);
-              }
-            } catch {
-              // Will retry on next flush
-            }
-          } else if (action.type === 'pageSync') {
-            // These will be picked up on next dirty page sync
-            await clearPendingAction(action.actionId);
-          }
-        }
-      }
+      await replaySessionActions();
     } finally {
       syncingRef.current = false;
       setIsSyncing(false);

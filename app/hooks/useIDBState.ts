@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Page } from '@/app/types';
+import { useOnlineStatus } from './useOnlineStatus';
 import {
   getPagesBySession,
   putPage,
@@ -84,19 +85,7 @@ export function useIDBState(
   sessionName: string
 ) {
   const [page, setPageState] = useState<Page | null>(initialPages[0] ?? null);
-  const onlineStatus = useSyncExternalStore(
-    (cb) => {
-      window.addEventListener('online', cb);
-      window.addEventListener('offline', cb);
-      return () => {
-        window.removeEventListener('online', cb);
-        window.removeEventListener('offline', cb);
-      };
-    },
-    () => navigator.onLine,
-    () => true
-  );
-  const isOffline = !onlineStatus;
+  const isOffline = !useOnlineStatus();
   const idbInitialized = useRef(false);
   const fetchStartedAtRef = useRef<number>(0);
 

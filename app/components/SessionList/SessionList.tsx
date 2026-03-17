@@ -1,23 +1,14 @@
 'use client';
 
-import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { getAllSessions, getSession, putSession, putPage, putPendingAction, getPendingActions, clearPendingAction, getPagesBySession } from '@/app/lib/idb';
+import { replaySessionActions } from '@/app/lib/replayPendingActions';
 import { v4 as uuidv4 } from 'uuid';
 import type { Page } from '@/app/types';
 import WhiteboardLoader from '@/app/components/Whiteboard/WhiteboardLoader';
-
-function subscribeOnline(callback: () => void) {
-  window.addEventListener('online', callback);
-  window.addEventListener('offline', callback);
-  return () => {
-    window.removeEventListener('online', callback);
-    window.removeEventListener('offline', callback);
-  };
-}
-function getOnlineSnapshot() { return navigator.onLine; }
-function getServerSnapshot() { return true; }
+import { useOnlineStatus } from '@/app/hooks/useOnlineStatus';
 
 interface SessionSummary {
   id: string;
@@ -33,8 +24,7 @@ interface SessionSummary {
 export default function SessionList() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const onlineStatus = useSyncExternalStore(subscribeOnline, getOnlineSnapshot, getServerSnapshot);
-  const isOffline = !onlineStatus;
+  const isOffline = !useOnlineStatus();
   const [navigatingId, setNavigatingId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -125,43 +115,9 @@ export default function SessionList() {
       .catch(() => setLoaded(true));
   }, []);
 
-  // Replay pending actions (sessionCreate/sessionDelete) when coming back online.
-  // The sync engine inside the Whiteboard only runs while a whiteboard is open,
-  // so we need this on the session list too.
+  // Replay pending actions when coming back online.
   useEffect(() => {
-    if (isOffline) return;
-    (async () => {
-      const pending = await getPendingActions();
-      for (const action of pending) {
-        try {
-          const payload = JSON.parse(action.payload);
-          if (action.type === 'sessionCreate') {
-            const res = await fetch('/api/sessions', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload),
-            });
-            if (res.ok || res.status < 500) {
-              await clearPendingAction(action.actionId);
-            }
-          } else if (action.type === 'sessionDelete') {
-            const res = await fetch(`/api/sessions/${payload.id}`, { method: 'DELETE' });
-            if (res.ok || res.status < 500) {
-              await clearPendingAction(action.actionId);
-            }
-          } else if (action.type === 'sessionRename') {
-            const res = await fetch(`/api/sessions/${payload.id}`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ name: payload.name }),
-            });
-            if (res.ok || res.status < 500) {
-              await clearPendingAction(action.actionId);
-            }
-          }
-        } catch { /* will retry next time */ }
-      }
-    })();
+    if (!isOffline) replaySessionActions();
   }, [isOffline]);
 
   useEffect(() => {
@@ -505,135 +461,173 @@ export default function SessionList() {
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {sessions.map(session => (
-                <div
+                <SessionCard
                   key={session.id}
-                  className={`group relative rounded-xl border border-white/8 bg-white/5 cursor-pointer transition-all duration-200 hover:border-white/15 hover:bg-white/8 hover:shadow-lg hover:shadow-black/30 hover:-translate-y-0.5 overflow-hidden ${
-                    navigatingId === session.id ? 'opacity-70 pointer-events-none scale-[0.98]' : ''
-                  }`}
-                  onClick={() => openSession(session.id)}
-                >
-                  {/* Thumbnail area — 16:9 to match common viewport */}
-                  <div
-                    className="aspect-video relative overflow-hidden rounded-t-xl"
-                    style={{ backgroundColor: session.bg_color || '#ffffff' }}
-                  >
-                    {session.thumbnail ? (
-                      <Image
-                        src={session.thumbnail}
-                        alt=""
-                        className="w-full h-full object-contain"
-                        draggable={false}
-                        fill
-                        unoptimized
-                      />
-                    ) : (
-                      <PreviewPattern pattern={session.bg_pattern} bgColor={session.bg_color || '#ffffff'} />
-                    )}
-
-                    {/* Loading overlay */}
-                    {navigatingId === session.id && (
-                      <div className="absolute inset-0 bg-black/40 flex items-center justify-center backdrop-blur-sm">
-                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      </div>
-                    )}
-
-                    {/* Context menu button */}
-                    <div className="absolute top-2 right-2">
-                      <button
-                        className="w-7 h-7 rounded-md flex items-center justify-center bg-black/30 backdrop-blur-sm text-white/70 text-xs cursor-pointer transition-all hover:bg-black/50 hover:text-white border-none opacity-0 group-hover:opacity-100"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setMenuId(menuId === session.id ? null : session.id);
-                        }}
-                        title="Options"
-                      >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                          <circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" />
-                        </svg>
-                      </button>
-
-                      {/* Dropdown menu */}
-                      {menuId === session.id && (
-                        <div
-                          ref={menuRef}
-                          className="absolute right-0 top-8 bg-neutral-800/95 backdrop-blur-md border border-white/10 rounded-lg shadow-xl py-1 min-w-[140px] z-10 animate-menu-in"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <button
-                            className="w-full px-3 py-1.5 text-left text-sm text-neutral-300 bg-transparent border-none cursor-pointer hover:bg-white/10 flex items-center gap-2"
-                            onClick={() => startRename(session.id, session.name)}
-                          >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                            </svg>
-                            Rename
-                          </button>
-                          <button
-                            className="w-full px-3 py-1.5 text-left text-sm text-neutral-300 bg-transparent border-none cursor-pointer hover:bg-white/10 flex items-center gap-2"
-                            onClick={() => cloneSession(session.id)}
-                          >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                            </svg>
-                            Clone
-                          </button>
-                          <div className="h-px bg-white/10 my-1" />
-                          {confirmDeleteId === session.id ? (
-                            <div className="flex items-center gap-1 px-2 py-1">
-                              <button
-                                className="flex-1 px-2 py-1.5 text-xs text-red-400 font-medium bg-red-500/15 border border-red-500/30 rounded cursor-pointer hover:bg-red-500/25 transition-colors"
-                                onClick={() => deleteSession(session.id)}
-                              >
-                                Delete
-                              </button>
-                              <button
-                                className="flex-1 px-2 py-1.5 text-xs text-neutral-400 bg-transparent border border-white/10 rounded cursor-pointer hover:bg-white/10 transition-colors"
-                                onClick={() => setConfirmDeleteId(null)}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              className="w-full px-3 py-1.5 text-left text-sm text-red-400 bg-transparent border-none cursor-pointer hover:bg-red-500/10 flex items-center gap-2"
-                              onClick={() => setConfirmDeleteId(session.id)}
-                            >
-                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                              </svg>
-                              Delete
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Info */}
-                  <div className="p-3">
-                    {editingId === session.id ? (
-                      <input
-                        ref={editRef}
-                        className="w-full bg-white/10 text-white text-sm px-2 py-1 rounded border border-blue-500 outline-none"
-                        value={editValue}
-                        onChange={e => setEditValue(e.target.value)}
-                        onBlur={commitRename}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') commitRename();
-                          if (e.key === 'Escape') setEditingId(null);
-                        }}
-                        onClick={e => e.stopPropagation()}
-                      />
-                    ) : (
-                      <div className="text-sm font-medium text-white truncate">{session.name}</div>
-                    )}
-                    <div className="text-xs text-neutral-500 mt-1">{formatDate(session.updated_at)}</div>
-                  </div>
-                </div>
+                  session={session}
+                  isNavigating={navigatingId === session.id}
+                  isMenuOpen={menuId === session.id}
+                  isEditing={editingId === session.id}
+                  isConfirmingDelete={confirmDeleteId === session.id}
+                  editValue={editValue}
+                  editRef={editRef}
+                  menuRef={menuRef}
+                  onOpen={() => openSession(session.id)}
+                  onMenuToggle={() => setMenuId(menuId === session.id ? null : session.id)}
+                  onRename={() => startRename(session.id, session.name)}
+                  onClone={() => cloneSession(session.id)}
+                  onDelete={() => deleteSession(session.id)}
+                  onConfirmDelete={() => setConfirmDeleteId(session.id)}
+                  onCancelDelete={() => setConfirmDeleteId(null)}
+                  onEditChange={setEditValue}
+                  onEditCommit={commitRename}
+                  onEditCancel={() => setEditingId(null)}
+                  formatDate={formatDate}
+                />
               ))}
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SessionCard({ session, isNavigating, isMenuOpen, isEditing, isConfirmingDelete, editValue, editRef, menuRef, onOpen, onMenuToggle, onRename, onClone, onDelete, onConfirmDelete, onCancelDelete, onEditChange, onEditCommit, onEditCancel, formatDate }: {
+  session: SessionSummary;
+  isNavigating: boolean;
+  isMenuOpen: boolean;
+  isEditing: boolean;
+  isConfirmingDelete: boolean;
+  editValue: string;
+  editRef: React.RefObject<HTMLInputElement | null>;
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  onOpen: () => void;
+  onMenuToggle: () => void;
+  onRename: () => void;
+  onClone: () => void;
+  onDelete: () => void;
+  onConfirmDelete: () => void;
+  onCancelDelete: () => void;
+  onEditChange: (v: string) => void;
+  onEditCommit: () => void;
+  onEditCancel: () => void;
+  formatDate: (iso: string) => string;
+}) {
+  return (
+    <div
+      className={`group relative rounded-xl border border-white/8 bg-white/5 cursor-pointer transition-all duration-200 hover:border-white/15 hover:bg-white/8 hover:shadow-lg hover:shadow-black/30 hover:-translate-y-0.5 overflow-hidden ${
+        isNavigating ? 'opacity-70 pointer-events-none scale-[0.98]' : ''
+      }`}
+      onClick={onOpen}
+    >
+      <div
+        className="aspect-video relative overflow-hidden rounded-t-xl"
+        style={{ backgroundColor: session.bg_color || '#ffffff' }}
+      >
+        {session.thumbnail ? (
+          <Image
+            src={session.thumbnail}
+            alt=""
+            className="w-full h-full object-contain"
+            draggable={false}
+            fill
+            unoptimized
+          />
+        ) : (
+          <PreviewPattern pattern={session.bg_pattern} bgColor={session.bg_color || '#ffffff'} />
+        )}
+
+        {isNavigating && (
+          <div className="absolute inset-0 bg-black/40 flex items-center justify-center backdrop-blur-sm">
+            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          </div>
+        )}
+
+        <div className="absolute top-2 right-2">
+          <button
+            className="w-7 h-7 rounded-md flex items-center justify-center bg-black/30 backdrop-blur-sm text-white/70 text-xs cursor-pointer transition-all hover:bg-black/50 hover:text-white border-none opacity-0 group-hover:opacity-100"
+            onClick={(e) => { e.stopPropagation(); onMenuToggle(); }}
+            title="Options"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" />
+            </svg>
+          </button>
+
+          {isMenuOpen && (
+            <div
+              ref={menuRef}
+              className="absolute right-0 top-8 bg-neutral-800/95 backdrop-blur-md border border-white/10 rounded-lg shadow-xl py-1 min-w-[140px] z-10 animate-menu-in"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                className="w-full px-3 py-1.5 text-left text-sm text-neutral-300 bg-transparent border-none cursor-pointer hover:bg-white/10 flex items-center gap-2"
+                onClick={onRename}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                </svg>
+                Rename
+              </button>
+              <button
+                className="w-full px-3 py-1.5 text-left text-sm text-neutral-300 bg-transparent border-none cursor-pointer hover:bg-white/10 flex items-center gap-2"
+                onClick={onClone}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+                Clone
+              </button>
+              <div className="h-px bg-white/10 my-1" />
+              {isConfirmingDelete ? (
+                <div className="flex items-center gap-1 px-2 py-1">
+                  <button
+                    className="flex-1 px-2 py-1.5 text-xs text-red-400 font-medium bg-red-500/15 border border-red-500/30 rounded cursor-pointer hover:bg-red-500/25 transition-colors"
+                    onClick={onDelete}
+                  >
+                    Delete
+                  </button>
+                  <button
+                    className="flex-1 px-2 py-1.5 text-xs text-neutral-400 bg-transparent border border-white/10 rounded cursor-pointer hover:bg-white/10 transition-colors"
+                    onClick={onCancelDelete}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className="w-full px-3 py-1.5 text-left text-sm text-red-400 bg-transparent border-none cursor-pointer hover:bg-red-500/10 flex items-center gap-2"
+                  onClick={onConfirmDelete}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                  </svg>
+                  Delete
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="p-3">
+        {isEditing ? (
+          <input
+            ref={editRef}
+            className="w-full bg-white/10 text-white text-sm px-2 py-1 rounded border border-blue-500 outline-none"
+            value={editValue}
+            onChange={e => onEditChange(e.target.value)}
+            onBlur={onEditCommit}
+            onKeyDown={e => {
+              if (e.key === 'Enter') onEditCommit();
+              if (e.key === 'Escape') onEditCancel();
+            }}
+            onClick={e => e.stopPropagation()}
+          />
+        ) : (
+          <div className="text-sm font-medium text-white truncate">{session.name}</div>
+        )}
+        <div className="text-xs text-neutral-500 mt-1">{formatDate(session.updated_at)}</div>
       </div>
     </div>
   );

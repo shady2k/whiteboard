@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import getDb from '@/app/lib/db';
+import { tryClaimAction, completeAction } from '@/app/lib/apiHelpers';
 
 // GET /api/snippets — list all snippets
 export async function GET() {
@@ -44,18 +45,8 @@ export async function POST(request: Request) {
   const now = new Date().toISOString();
 
   // Idempotency via action_log
-  if (actionId) {
-    const inserted = db.prepare(
-      'INSERT OR IGNORE INTO action_log (action_id, type, result, created_at) VALUES (?, ?, NULL, ?)'
-    ).run(actionId, 'snippetCreate', now);
-    if (inserted.changes === 0) {
-      const existing = db.prepare('SELECT result FROM action_log WHERE action_id = ?').get(actionId) as { result: string | null } | undefined;
-      if (existing?.result) {
-        return NextResponse.json(JSON.parse(existing.result));
-      }
-      return NextResponse.json({ ok: true, id });
-    }
-  }
+  const claimed = tryClaimAction(actionId, 'snippetCreate');
+  if (claimed) return claimed;
 
   const result = { ok: true, id };
 
@@ -63,9 +54,7 @@ export async function POST(request: Request) {
     'INSERT OR REPLACE INTO snippets (id, name, strokes, width, height, thumbnail, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(id, name, JSON.stringify(strokes), width, height, thumbnail ?? null, now, now);
 
-  if (actionId) {
-    db.prepare('UPDATE action_log SET result = ? WHERE action_id = ?').run(JSON.stringify(result), actionId);
-  }
+  completeAction(actionId, result);
 
   return NextResponse.json(result);
 }

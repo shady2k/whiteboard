@@ -3,6 +3,7 @@ import getDb from '@/app/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
+import { tryClaimAction, completeAction } from '@/app/lib/apiHelpers';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const ASSETS_DIR = path.join(DATA_DIR, 'assets');
@@ -18,24 +19,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 });
   }
 
-  // Check actionId for deduplication (atomic via INSERT OR IGNORE + check)
+  // Check actionId for deduplication
   const actionId = formData.get('actionId') as string | null;
-  if (actionId) {
-    const db = getDb();
-    // Try to claim the action ID first — if it already exists, return cached result
-    const inserted = db.prepare(
-      'INSERT OR IGNORE INTO action_log (action_id, type, result, created_at) VALUES (?, ?, NULL, ?)'
-    ).run(actionId, 'assetUpload', new Date().toISOString());
-    if (inserted.changes === 0) {
-      // Another request already claimed this action ID
-      const existing = db.prepare('SELECT result FROM action_log WHERE action_id = ?').get(actionId) as { result: string | null } | undefined;
-      if (existing?.result) {
-        return NextResponse.json(JSON.parse(existing.result), { status: 201 });
-      }
-      // result is NULL — another request is still processing, tell client to retry
-      return NextResponse.json({ error: 'Action in progress' }, { status: 409 });
-    }
-  }
+  const claimed = tryClaimAction(actionId, 'assetUpload');
+  if (claimed) return claimed;
 
   if (!ALLOWED_MIME_TYPES.has(file.type)) {
     return NextResponse.json({ error: 'File type not allowed. Use PNG, JPEG, WebP, or GIF.' }, { status: 400 });
@@ -64,11 +51,7 @@ export async function POST(request: Request) {
   const result = { id: assetId, mimeType: file.type, size: buffer.length };
 
   // Update action log with result
-  if (actionId) {
-    db.prepare(
-      'UPDATE action_log SET result = ? WHERE action_id = ?'
-    ).run(JSON.stringify(result), actionId);
-  }
+  completeAction(actionId, result);
 
   return NextResponse.json(result, { status: 201 });
 }

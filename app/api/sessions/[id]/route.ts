@@ -3,6 +3,7 @@ import getDb from '@/app/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
+import { getSessionAssetIds, loadPagesWithStrokes } from '@/app/lib/apiHelpers';
 
 // GET /api/sessions/:id — get full session with pages and strokes
 export async function GET(
@@ -21,20 +22,7 @@ export async function GET(
     'SELECT * FROM pages WHERE session_id = ? ORDER BY position'
   ).all(id) as Array<Record<string, unknown>>;
 
-  const pagesWithStrokes = pages.map(page => {
-    const strokes = db.prepare(
-      'SELECT * FROM strokes WHERE page_id = ? ORDER BY z_order'
-    ).all(page.id as string) as Array<Record<string, unknown>>;
-
-    return {
-      ...page,
-      strokes: strokes.map(s => ({
-        ...JSON.parse(s.data as string),
-        id: s.id,
-        type: s.type,
-      })),
-    };
-  });
+  const pagesWithStrokes = loadPagesWithStrokes(db, pages);
 
   return NextResponse.json({ ...session, pages: pagesWithStrokes });
 }
@@ -67,14 +55,7 @@ export async function DELETE(
   const db = getDb();
 
   // Collect asset IDs referenced by this session's strokes
-  const assetIds = (db.prepare(`
-    SELECT DISTINCT json_extract(s.data, '$.assetId') as assetId
-    FROM strokes s
-    INNER JOIN pages p ON s.page_id = p.id
-    WHERE p.session_id = ? AND s.type = 'image'
-  `).all(id) as Array<{ assetId: string | null }>)
-    .map(r => r.assetId)
-    .filter((aid): aid is string => aid !== null);
+  const assetIds = getSessionAssetIds(id);
 
   // Delete session (cascades to pages and strokes)
   db.prepare('DELETE FROM sessions WHERE id = ?').run(id);

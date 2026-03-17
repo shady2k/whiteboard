@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import getDb from '@/app/lib/db';
 import { v4 as uuidv4 } from 'uuid';
+import { tryClaimAction, completeAction, getPageAssetIds } from '@/app/lib/apiHelpers';
 
 // POST /api/pages — add a page to a session
 export async function POST(request: Request) {
@@ -39,18 +40,8 @@ export async function PUT(request: Request) {
   const db = getDb();
 
   // Atomic dedup: claim the action ID first
-  if (actionId) {
-    const inserted = db.prepare(
-      'INSERT OR IGNORE INTO action_log (action_id, type, result, created_at) VALUES (?, ?, NULL, ?)'
-    ).run(actionId, 'backgroundSync', new Date().toISOString());
-    if (inserted.changes === 0) {
-      const existing = db.prepare('SELECT result FROM action_log WHERE action_id = ?').get(actionId) as { result: string | null } | undefined;
-      if (existing?.result) {
-        return NextResponse.json(JSON.parse(existing.result));
-      }
-      return NextResponse.json({ error: 'Action in progress' }, { status: 409 });
-    }
-  }
+  const claimed = tryClaimAction(actionId, 'backgroundSync');
+  if (claimed) return claimed;
 
   let newRevision = 0;
   const transaction = db.transaction(() => {
@@ -70,9 +61,7 @@ export async function PUT(request: Request) {
   const result = { ok: true, revision: newRevision };
 
   // Update action log with result
-  if (actionId) {
-    db.prepare('UPDATE action_log SET result = ? WHERE action_id = ?').run(JSON.stringify(result), actionId);
-  }
+  completeAction(actionId, result);
 
   return NextResponse.json(result);
 }
@@ -84,11 +73,7 @@ export async function DELETE(request: Request) {
   const now = new Date().toISOString();
 
   // Collect asset IDs referenced by this page's strokes before cascade delete
-  const assetIds = (db.prepare(
-    "SELECT json_extract(data, '$.assetId') as assetId FROM strokes WHERE page_id = ? AND type = 'image'"
-  ).all(pageId) as Array<{ assetId: string | null }>)
-    .map(r => r.assetId)
-    .filter((aid): aid is string => aid !== null);
+  const assetIds = getPageAssetIds(pageId);
 
   const transaction = db.transaction(() => {
     const page = db.prepare('SELECT position FROM pages WHERE id = ?').get(pageId) as { position: number } | undefined;
