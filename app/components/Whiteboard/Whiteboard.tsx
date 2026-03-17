@@ -1,17 +1,21 @@
 'use client';
 
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { Stroke, ToolType, StrokeStyle, Command, Page, BackgroundPattern, ImageStroke } from '@/app/types';
+import { Stroke, ToolType, StrokeStyle, Command, Page, BackgroundPattern, ImageStroke, Snippet } from '@/app/types';
 import Canvas from '@/app/components/Canvas/Canvas';
 import Toolbar from '@/app/components/Toolbar/Toolbar';
 import PageNav from '@/app/components/PageNav/PageNav';
+import SnippetSaveDialog from '@/app/components/SnippetSaveDialog';
+import SnippetPanel from '@/app/components/SnippetPanel';
 import { useIDBState } from '@/app/hooks/useIDBState';
 import { useSyncEngine } from '@/app/hooks/useSyncEngine';
+import { useSnippetSync } from '@/app/hooks/useSnippetSync';
 import { saveUndoHistory, loadUndoHistory, putAsset, getSession, putSession } from '@/app/lib/idb';
 import { v4 as uuidv4 } from 'uuid';
 import { exportPageAsPng, exportAllPagesAsPdf, downloadBlob } from '@/app/utils/exportPage';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { renderAllStrokes } from '@/app/utils/renderStroke';
+import { createSnippet, denormalizeStrokes, generateSnippetThumbnail, normalizeStrokes } from '@/app/utils/snippetUtils';
 import Image from 'next/image';
 
 async function loadPdfDocument(file: File | Blob): Promise<import('pdfjs-dist').PDFDocumentProxy> {
@@ -71,6 +75,13 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const [zoom, setZoom] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [showCheatsheet, setShowCheatsheet] = useState(false);
+
+  // Snippet state
+  const { snippets, saveSnippet, deleteSnippet } = useSnippetSync();
+  const [snippetPanelOpen, setSnippetPanelOpen] = useState(false);
+  const [pendingSelection, setPendingSelection] = useState<{ strokes: Stroke[]; bounds: { x: number; y: number; width: number; height: number } } | null>(null);
+  const [snippetSaveDialog, setSnippetSaveDialog] = useState(false);
+  const [pasteSnippet, setPasteSnippet] = useState<Snippet | null>(null);
 
   const strokes = useMemo(() => page?.strokes ?? [], [page?.strokes]);
 
@@ -213,6 +224,14 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         case 'transformImageStroke':
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.oldStroke : st));
           break;
+        case 'pasteSnippet': {
+          const ids = new Set(cmd.strokes.map(s => s.id));
+          updatePageStrokes(cmd.pageId, s => s.filter(st => !ids.has(st.id)));
+          break;
+        }
+        case 'deleteSelected':
+          updatePageStrokes(cmd.pageId, s => [...s, ...cmd.strokes]);
+          break;
       }
 
       setRedoStack(r => [...r, cmd]);
@@ -248,6 +267,14 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         case 'transformImageStroke':
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.newStroke : st));
           break;
+        case 'pasteSnippet':
+          updatePageStrokes(cmd.pageId, s => [...s, ...cmd.strokes]);
+          break;
+        case 'deleteSelected': {
+          const ids = new Set(cmd.strokes.map(s => s.id));
+          updatePageStrokes(cmd.pageId, s => s.filter(st => !ids.has(st.id)));
+          break;
+        }
       }
 
       setUndoStack(u => [...u, cmd]);
@@ -306,6 +333,11 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const handleExportPngRef = useRef<() => void>(() => {});
   const handleExportPdfRef = useRef<() => void>(() => {});
   const handleImportFileRef = useRef<() => void>(() => {});
+  const copySelectionRef = useRef<(() => void) | null>(null);
+  const deleteSelectionRef = useRef<(() => void) | null>(null);
+  const pasteFromClipboardRef = useRef<(() => void) | null>(null);
+  const clipboardRef = useRef<Stroke[] | null>(null);
+  const pendingSelectionRef = useRef(pendingSelection);
 
   const [pdfPageDialog, setPdfPageDialog] = useState<{ pdf: import('pdfjs-dist').PDFDocumentProxy; numPages: number } | null>(null);
 
@@ -314,7 +346,27 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     const handleKeyDown = (e: KeyboardEvent) => {
       const isCmd = e.metaKey || e.ctrlKey;
 
-      if (isCmd && e.key === 'z' && !e.shiftKey) {
+      // Skip clipboard/selection shortcuts if user is typing in an input
+      const isEditing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+
+      if (isCmd && e.key === 'c' && !e.shiftKey && !isEditing) {
+        if (pendingSelectionRef.current && copySelectionRef.current) {
+          e.preventDefault();
+          copySelectionRef.current();
+        }
+        return;
+      } else if (isCmd && e.key === 'v' && !e.shiftKey && !isEditing) {
+        // Only intercept if we have a stroke clipboard; let default paste handle images
+        if (clipboardRef.current) {
+          e.preventDefault();
+          pasteFromClipboardRef.current?.();
+        }
+        return;
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && !isEditing && pendingSelectionRef.current) {
+        e.preventDefault();
+        deleteSelectionRef.current?.();
+        return;
+      } else if (isCmd && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
         undo();
       } else if (isCmd && e.key === 'z' && e.shiftKey) {
@@ -345,6 +397,9 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         e.preventDefault();
         setShowCheatsheet(v => {
           if (v) return false;
+          // Cancel snippet paste or selection
+          setPasteSnippet(null);
+          setPendingSelection(null);
           setActiveTool('pen');
           return false;
         });
@@ -369,6 +424,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
           case 'r': setActiveTool('rect'); break;
           case 't': setActiveTool('triangle'); break;
           case 'o': setActiveTool('ellipse'); break;
+          case 's': setActiveTool('select'); break;
         }
       }
     };
@@ -579,6 +635,110 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
   }, [page?.id, strokes, pushCommand, updatePageStrokes, queuePageSync]);
 
+  // Clipboard for copy/paste of strokes
+  const [clipboard, setClipboard] = useState<Stroke[] | null>(null);
+
+  // Selection complete handler — just store selection, show action bar
+  const handleSelectionComplete = useCallback((selectedStrokes: Stroke[], bounds: { x: number; y: number; width: number; height: number }) => {
+    setPendingSelection({ strokes: selectedStrokes, bounds });
+  }, []);
+
+  // Clear selection
+  const clearSelection = useCallback(() => {
+    setPendingSelection(null);
+  }, []);
+
+  // Copy selected strokes to clipboard
+  const copySelection = useCallback(() => {
+    if (!pendingSelection) return;
+    const { normalized } = normalizeStrokes(pendingSelection.strokes);
+    setClipboard(normalized);
+    setPendingSelection(null);
+  }, [pendingSelection]);
+
+  // Delete selected strokes
+  const deleteSelection = useCallback(() => {
+    if (!pendingSelection || !page) return;
+    const ids = new Set(pendingSelection.strokes.map(s => s.id));
+    pushCommand({ type: 'deleteSelected', pageId: page.id, strokes: pendingSelection.strokes });
+    updatePageStrokes(page.id, s => s.filter(st => !ids.has(st.id)));
+    setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
+    setPendingSelection(null);
+  }, [pendingSelection, page, pushCommand, updatePageStrokes, queuePageSync]);
+
+  // Save selection as snippet
+  const saveSelectionAsSnippet = useCallback(() => {
+    if (!pendingSelection) return;
+    setSnippetSaveDialog(true);
+  }, [pendingSelection]);
+
+  // Save snippet handler
+  const handleSnippetSave = useCallback((name: string) => {
+    if (!pendingSelection) return;
+    const snippet = createSnippet(name, pendingSelection.strokes);
+    saveSnippet(snippet);
+    setPendingSelection(null);
+    setSnippetSaveDialog(false);
+  }, [pendingSelection, saveSnippet]);
+
+  // Paste from clipboard at mouse cursor position
+  const pasteFromClipboard = useCallback(() => {
+    if (!clipboard || !page) return;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const { normalized, width, height } = normalizeStrokes(clipboard);
+    const s = scaleRef.current;
+    const panX = (vw / 2) * (1 - s) + panOffsetRef.current.x;
+    const panY = (vh / 2) * (1 - s) + panOffsetRef.current.y;
+    // Convert mouse screen position to canvas coordinates
+    const canvasX = (mouseRef.current.x - panX) / s - width / 2;
+    const canvasY = (mouseRef.current.y - panY) / s - height / 2;
+    const newStrokes = denormalizeStrokes(normalized, canvasX, canvasY);
+    setPage(prev => ({ ...prev, strokes: [...prev.strokes, ...newStrokes] }));
+    pushCommand({ type: 'pasteSnippet', pageId: page.id, strokes: newStrokes });
+    setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
+  }, [clipboard, page, setPage, pushCommand, queuePageSync]);
+
+  // Track mouse position for paste-at-cursor
+  const mouseRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => { mouseRef.current = { x: e.clientX, y: e.clientY }; };
+    window.addEventListener('pointermove', onMove);
+    return () => window.removeEventListener('pointermove', onMove);
+  }, []);
+
+  // Refs for keyboard shortcut access
+  const scaleRef = useRef(zoom);
+  useEffect(() => { scaleRef.current = zoom; }, [zoom]);
+  const panOffsetRef = useRef(panOffset);
+  useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
+
+  // Paste confirm handler (for snippet paste preview mode)
+  const handlePasteConfirm = useCallback((targetX: number, targetY: number) => {
+    if (!pasteSnippet || !page) return;
+    const offsetX = targetX - pasteSnippet.width / 2;
+    const offsetY = targetY - pasteSnippet.height / 2;
+    const newStrokes = denormalizeStrokes(pasteSnippet.strokes, offsetX, offsetY);
+    setPage(prev => ({ ...prev, strokes: [...prev.strokes, ...newStrokes] }));
+    pushCommand({ type: 'pasteSnippet', pageId: page.id, strokes: newStrokes });
+    setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
+    setPasteSnippet(null);
+  }, [pasteSnippet, page, setPage, pushCommand, queuePageSync]);
+
+  // Start paste mode from snippet panel
+  const handleSnippetPaste = useCallback((snippet: Snippet) => {
+    setPasteSnippet(snippet);
+    setSnippetPanelOpen(false);
+    setActiveTool('select');
+  }, []);
+
+  // Keep refs updated for keyboard shortcuts
+  useEffect(() => { copySelectionRef.current = copySelection; }, [copySelection]);
+  useEffect(() => { deleteSelectionRef.current = deleteSelection; }, [deleteSelection]);
+  useEffect(() => { pasteFromClipboardRef.current = pasteFromClipboard; }, [pasteFromClipboard]);
+  useEffect(() => { clipboardRef.current = clipboard; }, [clipboard]);
+  useEffect(() => { pendingSelectionRef.current = pendingSelection; }, [pendingSelection]);
+
   if (!page) {
     return (
       <div className="fixed inset-0 flex items-center justify-center" style={{ background: '#16161a' }}>
@@ -611,7 +771,22 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         onToolChange={setActiveTool}
         onZoomChange={setZoom}
         onPanChange={setPanOffset}
+        onSelectionComplete={handleSelectionComplete}
+        pastePreview={pasteSnippet}
+        onPasteConfirm={handlePasteConfirm}
+        selectionActive={!!pendingSelection}
       />
+      {/* Selection action bar */}
+      {pendingSelection && activeTool === 'select' && !pasteSnippet && (
+        <SelectionActionBar
+          bounds={pendingSelection.bounds}
+          zoom={zoom}
+          panOffset={panOffset}
+          onCopy={copySelection}
+          onDelete={deleteSelection}
+          onSaveSnippet={saveSelectionAsSnippet}
+        />
+      )}
       <Toolbar
         activeTool={activeTool}
         strokeStyle={strokeStyle}
@@ -636,6 +811,8 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         onExportPng={handleExportPng}
         onExportPdf={handleExportPdf}
         onShowCheatsheet={() => setShowCheatsheet(true)}
+        onSnippetPanelToggle={() => setSnippetPanelOpen(v => !v)}
+        snippetPanelOpen={snippetPanelOpen}
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
       />
@@ -662,6 +839,25 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         />
       )}
       {showCheatsheet && <Cheatsheet onClose={() => setShowCheatsheet(false)} />}
+      {snippetPanelOpen && (
+        <SnippetPanel
+          snippets={snippets}
+          onPaste={handleSnippetPaste}
+          onDelete={deleteSnippet}
+          onClose={() => setSnippetPanelOpen(false)}
+        />
+      )}
+      {snippetSaveDialog && pendingSelection && (
+        <SnippetSaveDialog
+          thumbnail={(() => {
+            const { normalized, width, height } = normalizeStrokes(pendingSelection.strokes);
+            return generateSnippetThumbnail(normalized, width, height);
+          })()}
+          strokeCount={pendingSelection.strokes.length}
+          onSave={handleSnippetSave}
+          onCancel={() => { setSnippetSaveDialog(false); setPendingSelection(null); }}
+        />
+      )}
     </>
   );
 }
@@ -669,6 +865,63 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);
 const MOD = isMac ? '\u2318' : 'Ctrl';
 const SHIFT = isMac ? '\u21E7' : 'Shift';
+
+function SelectionActionBar({ bounds, zoom, panOffset, onCopy, onDelete, onSaveSnippet }: {
+  bounds: { x: number; y: number; width: number; height: number };
+  zoom: number;
+  panOffset: { x: number; y: number };
+  onCopy: () => void;
+  onDelete: () => void;
+  onSaveSnippet: () => void;
+}) {
+  const w = typeof window !== 'undefined' ? window.innerWidth : 0;
+  const h = typeof window !== 'undefined' ? window.innerHeight : 0;
+  const s = zoom;
+  const pX = (w / 2) * (1 - s) + panOffset.x;
+  const pY = (h / 2) * (1 - s) + panOffset.y;
+  const screenX = (bounds.x + bounds.width / 2) * s + pX;
+  const screenY = (bounds.y + bounds.height) * s + pY + 12;
+  return (
+    <div
+      className="fixed z-50 bg-neutral-900/90 backdrop-blur-md rounded-lg px-1.5 py-1 flex items-center gap-1 shadow-xl border border-neutral-700/50 animate-slide-up"
+      style={{ left: screenX, top: screenY, transform: 'translateX(-50%)' }}
+      onPointerDown={e => e.stopPropagation()}
+    >
+      <SelectActionBtn onClick={onCopy} title={`Copy (${isMac ? '\u2318' : 'Ctrl'}+C)`} icon={<CopyIcon />} label="Copy" />
+      <SelectActionBtn onClick={onDelete} title="Delete" icon={<DeleteIcon />} label="Delete" danger />
+      <div className="w-px h-5 bg-white/15 mx-0.5" />
+      <SelectActionBtn onClick={onSaveSnippet} title="Save as Snippet" icon={<SnippetSaveIcon />} label="Snippet" />
+    </div>
+  );
+}
+
+function SelectActionBtn({ onClick, title, icon, label, danger }: {
+  onClick: () => void; title: string; icon: React.ReactNode; label: string; danger?: boolean;
+}) {
+  return (
+    <button
+      className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs bg-transparent border-none cursor-pointer transition-colors whitespace-nowrap
+        ${danger ? 'text-red-400 hover:bg-red-500/15' : 'text-neutral-300 hover:bg-white/10 hover:text-white'}`}
+      onClick={onClick}
+      title={title}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function CopyIcon() {
+  return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>);
+}
+
+function DeleteIcon() {
+  return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>);
+}
+
+function SnippetSaveIcon() {
+  return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="2" width="14" height="14" rx="2" /><path d="M4 8H2v14a2 2 0 0 0 2 2h14v-2" /></svg>);
+}
 
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
@@ -719,6 +972,7 @@ function Cheatsheet({ onClose }: { onClose: () => void }) {
             <ShortcutRow keys={['R']} label="Rectangle" />
             <ShortcutRow keys={['T']} label="Triangle" />
             <ShortcutRow keys={['O']} label="Ellipse" />
+            <ShortcutRow keys={['S']} label="Select" />
             <ShortcutRow keys={['Esc']} label="Back to Pen" />
           </div>
 
@@ -747,7 +1001,9 @@ function Cheatsheet({ onClose }: { onClose: () => void }) {
             <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Edit</div>
             <ShortcutRow keys={[MOD, 'Z']} label="Undo" />
             <ShortcutRow keys={[MOD, SHIFT, 'Z']} label="Redo" />
-            <ShortcutRow keys={[MOD, 'V']} label="Paste image" />
+            <ShortcutRow keys={[MOD, 'C']} label="Copy selection" />
+            <ShortcutRow keys={[MOD, 'V']} label="Paste" />
+            <ShortcutRow keys={['Del']} label="Delete selection" />
             <ShortcutRow keys={['Shift']} label="Snap shape / lock ratio" />
           </div>
 

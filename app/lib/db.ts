@@ -73,6 +73,20 @@ function initSchema(db: Database.Database) {
   if (!cols.some(c => c.name === 'thumbnail')) {
     db.exec("ALTER TABLE sessions ADD COLUMN thumbnail TEXT DEFAULT NULL");
   }
+
+  // Migration: add snippets table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS snippets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      strokes TEXT NOT NULL,
+      width REAL NOT NULL,
+      height REAL NOT NULL,
+      thumbnail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 }
 
 export default getDb;

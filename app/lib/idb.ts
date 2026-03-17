@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { Page, Command } from '@/app/types';
+import type { Page, Command, Snippet } from '@/app/types';
 import type { DirtyPage, LocalAsset, AssetMapping, PendingAction } from '@/app/types';
 
 interface WhiteboardDB extends DBSchema {
@@ -42,24 +42,33 @@ interface WhiteboardDB extends DBSchema {
     key: string;
     value: PendingAction;
   };
+  snippets: {
+    key: string;
+    value: Snippet;
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<WhiteboardDB>> | null = null;
 
 function getDB(): Promise<IDBPDatabase<WhiteboardDB>> {
   if (!dbPromise) {
-    dbPromise = openDB<WhiteboardDB>('whiteboard', 1, {
-      upgrade(db) {
-        db.createObjectStore('sessions', { keyPath: 'id' });
+    dbPromise = openDB<WhiteboardDB>('whiteboard', 2, {
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore('sessions', { keyPath: 'id' });
 
-        const pageStore = db.createObjectStore('pages', { keyPath: 'id' });
-        pageStore.createIndex('sessionId', 'sessionId');
+          const pageStore = db.createObjectStore('pages', { keyPath: 'id' });
+          pageStore.createIndex('sessionId', 'sessionId');
 
-        db.createObjectStore('dirtyPages', { keyPath: 'pageId' });
-        db.createObjectStore('undoHistory', { keyPath: 'sessionId' });
-        db.createObjectStore('assets', { keyPath: 'id' });
-        db.createObjectStore('assetUploadMap', { keyPath: 'localId' });
-        db.createObjectStore('pendingActions', { keyPath: 'actionId' });
+          db.createObjectStore('dirtyPages', { keyPath: 'pageId' });
+          db.createObjectStore('undoHistory', { keyPath: 'sessionId' });
+          db.createObjectStore('assets', { keyPath: 'id' });
+          db.createObjectStore('assetUploadMap', { keyPath: 'localId' });
+          db.createObjectStore('pendingActions', { keyPath: 'actionId' });
+        }
+        if (oldVersion < 2) {
+          db.createObjectStore('snippets', { keyPath: 'id' });
+        }
       },
     });
   }
@@ -209,4 +218,21 @@ export async function getPendingActions(): Promise<PendingAction[]> {
 export async function clearPendingAction(actionId: string) {
   const db = await getDB();
   return db.delete('pendingActions', actionId);
+}
+
+// --- Snippets ---
+
+export async function putSnippet(snippet: Snippet) {
+  const db = await getDB();
+  return db.put('snippets', snippet);
+}
+
+export async function getAllSnippets(): Promise<Snippet[]> {
+  const db = await getDB();
+  return db.getAll('snippets');
+}
+
+export async function deleteSnippetFromIDB(id: string) {
+  const db = await getDB();
+  return db.delete('snippets', id);
 }

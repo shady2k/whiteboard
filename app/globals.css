@@ -57,3 +57,19 @@ body {
 .animate-slide-up {
   animation: slide-up 0.2s ease-out both;
 }
+
+/* Slide in from right for panels */
+@keyframes slide-left {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-left {
+  animation: slide-left 0.2s ease-out both;
+}

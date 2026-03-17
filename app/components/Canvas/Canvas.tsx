@@ -1,13 +1,14 @@
 'use client';
 
 import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
-import { Point, Stroke, FreehandStroke, MarkerStroke, ImageStroke, StrokeStyle, ToolType, BackgroundPattern } from '@/app/types';
+import { Point, Stroke, FreehandStroke, MarkerStroke, ImageStroke, StrokeStyle, ToolType, BackgroundPattern, Snippet } from '@/app/types';
 import { drawFreehandPoints, drawMarkerPoints } from '@/app/utils/drawStroke';
 import { renderStroke, renderAllStrokes } from '@/app/utils/renderStroke';
 import { drawLinePreview, drawRectPreview, drawEllipsePreview, drawTrianglePreview } from '@/app/utils/drawShape';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { snapLineEnd, snapRectEnd, snapEllipseEnd } from '@/app/utils/snapShape';
 import { getCachedImage } from '@/app/utils/imageCache';
+import { strokeIntersectsRect } from '@/app/utils/strokeBounds';
 import { v4 as uuidv4 } from 'uuid';
 
 interface CanvasProps {
@@ -24,6 +25,10 @@ interface CanvasProps {
   onToolChange?: (tool: ToolType) => void;
   onZoomChange?: (zoom: number) => void;
   onPanChange?: (offset: { x: number; y: number }) => void;
+  onSelectionComplete?: (strokes: Stroke[], bounds: { x: number; y: number; width: number; height: number }) => void;
+  pastePreview?: Snippet | null;
+  onPasteConfirm?: (targetX: number, targetY: number) => void;
+  selectionActive?: boolean;
 }
 
 type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se';
@@ -42,6 +47,10 @@ export default function Canvas({
   onToolChange,
   onZoomChange,
   onPanChange,
+  onSelectionComplete,
+  pastePreview,
+  onPasteConfirm,
+  selectionActive,
 }: CanvasProps) {
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const inkCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -85,6 +94,9 @@ export default function Canvas({
   const onZoomChangeRef = useRef(onZoomChange);
   const onPanChangeRef = useRef(onPanChange);
   const panOffsetRef = useRef(panOffset);
+  const onSelectionCompleteRef = useRef(onSelectionComplete);
+  const onPasteConfirmRef = useRef(onPasteConfirm);
+  const pastePreviewRef = useRef(pastePreview);
 
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { strokeStyleRef.current = strokeStyle; }, [strokeStyle]);
@@ -99,6 +111,9 @@ export default function Canvas({
   useEffect(() => { onZoomChangeRef.current = onZoomChange; }, [onZoomChange]);
   useEffect(() => { onPanChangeRef.current = onPanChange; }, [onPanChange]);
   useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
+  useEffect(() => { onSelectionCompleteRef.current = onSelectionComplete; }, [onSelectionComplete]);
+  useEffect(() => { onPasteConfirmRef.current = onPasteConfirm; }, [onPasteConfirm]);
+  useEffect(() => { pastePreviewRef.current = pastePreview; }, [pastePreview]);
 
   const getCtx = useCallback((canvas: HTMLCanvasElement | null): CanvasRenderingContext2D | null => {
     return canvas?.getContext('2d') ?? null;
@@ -288,6 +303,13 @@ export default function Canvas({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [clearPreview]);
 
+  // Clear preview when selection is dismissed
+  useEffect(() => {
+    if (selectionActive === false && activeTool === 'select') {
+      clearPreview();
+    }
+  }, [selectionActive, activeTool, clearPreview]);
+
   // Deselect image when tool changes away from hand
   useEffect(() => {
     if (activeTool !== 'hand') {
@@ -306,6 +328,7 @@ export default function Canvas({
     }
   }, [strokes, selectedImage, clearPreview]);
 
+  // Helper to get canvas-space point from pointer event (used inline below)
   const getPoint = useCallback((e: PointerEvent): Point => {
     const canvas = previewCanvasRef.current!;
     const rect = canvas.getBoundingClientRect();
@@ -315,6 +338,44 @@ export default function Canvas({
     const pressure = e.pointerType === 'mouse' ? 0.5 : (e.pressure || 0.5);
     return { x: (screenX - panX) / s, y: (screenY - panY) / s, pressure };
   }, [getTransform]);
+
+  // Paste preview: render ghost strokes following cursor
+  useEffect(() => {
+    if (!pastePreview || activeTool !== 'select') return;
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+
+    const onMove = (e: PointerEvent) => {
+      const point = getPoint(e);
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = requestAnimationFrame(() => {
+        clearPreview();
+        const ctx = getCtx(previewCanvasRef.current);
+        if (!ctx) return;
+        const { panX, panY, scale: s } = getTransform();
+        ctx.save();
+        ctx.translate(panX, panY);
+        ctx.scale(s, s);
+        ctx.globalAlpha = 0.5;
+        const offsetX = point.x - pastePreview.width / 2;
+        const offsetY = point.y - pastePreview.height / 2;
+        for (const stroke of pastePreview.strokes) {
+          const shifted = offsetStrokeForPreview(stroke, offsetX, offsetY);
+          renderStroke(ctx, shifted);
+        }
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 1 / s;
+        ctx.setLineDash([4 / s, 3 / s]);
+        ctx.strokeRect(offsetX, offsetY, pastePreview.width, pastePreview.height);
+        ctx.setLineDash([]);
+        ctx.restore();
+      });
+    };
+
+    canvas.addEventListener('pointermove', onMove);
+    return () => canvas.removeEventListener('pointermove', onMove);
+  }, [pastePreview, activeTool, getPoint, getCtx, getTransform, clearPreview]);
 
   // Find image stroke at point and which handle (if any)
   const findImageAtPoint = useCallback((p: Point): { stroke: ImageStroke; handle: DragHandle } | null => {
@@ -424,6 +485,22 @@ export default function Canvas({
       }
 
       const point = getPoint(e);
+
+      // Select tool: start selection rectangle or paste preview click
+      if (tool === 'select') {
+        if (pastePreviewRef.current) {
+          // Paste mode: place snippet at clicked position
+          if (onPasteConfirmRef.current) {
+            onPasteConfirmRef.current(point.x, point.y);
+          }
+          return;
+        }
+        // Start selection rectangle
+        startPointRef.current = point;
+        currentPointRef.current = point;
+        isDrawingRef.current = true;
+        return;
+      }
 
       // Hand tool: pan canvas or select/drag images
       if (tool === 'hand') {
@@ -588,6 +665,37 @@ export default function Canvas({
       }
 
       const tool = activeToolRef.current;
+
+      // Select tool: draw selection rectangle
+      if (tool === 'select' && startPointRef.current) {
+        currentPointRef.current = getPoint(e);
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = requestAnimationFrame(() => {
+          clearPreview();
+          const ctx = getCtx(previewCanvasRef.current);
+          const start = startPointRef.current;
+          const end = currentPointRef.current;
+          if (!ctx || !start || !end) return;
+          const { panX, panY, scale: s } = getTransform();
+          ctx.save();
+          ctx.translate(panX, panY);
+          ctx.scale(s, s);
+          const rx = Math.min(start.x, end.x);
+          const ry = Math.min(start.y, end.y);
+          const rw = Math.abs(end.x - start.x);
+          const rh = Math.abs(end.y - start.y);
+          ctx.strokeStyle = '#3b82f6';
+          ctx.lineWidth = 2 / s;
+          ctx.setLineDash([6 / s, 3 / s]);
+          ctx.strokeRect(rx, ry, rw, rh);
+          ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+          ctx.fillRect(rx, ry, rw, rh);
+          ctx.setLineDash([]);
+          ctx.restore();
+        });
+        return;
+      }
+
       const events = e.getCoalescedEvents?.() ?? [e];
 
       if (tool === 'pen' || tool === 'marker') {
@@ -717,6 +825,32 @@ export default function Canvas({
       const tool = activeToolRef.current;
       const style = strokeStyleRef.current;
 
+      // Select tool: complete selection
+      if (tool === 'select' && startPointRef.current) {
+        const end = getPoint(e);
+        const start = startPointRef.current;
+        const rx = Math.min(start.x, end.x);
+        const ry = Math.min(start.y, end.y);
+        const rw = Math.abs(end.x - start.x);
+        const rh = Math.abs(end.y - start.y);
+        startPointRef.current = null;
+        currentPointRef.current = null;
+
+        if (rw > 5 && rh > 5) {
+          const rect = { minX: rx, minY: ry, maxX: rx + rw, maxY: ry + rh };
+          const selected = strokesRef.current.filter(s => strokeIntersectsRect(s, rect));
+          if (selected.length > 0 && onSelectionCompleteRef.current) {
+            onSelectionCompleteRef.current(selected, { x: rx, y: ry, width: rw, height: rh });
+            // Keep selection rectangle visible (don't clear preview)
+          } else {
+            clearPreview();
+          }
+        } else {
+          clearPreview();
+        }
+        return;
+      }
+
       if (tool === 'eraser') {
         clearPreview();
         return;
@@ -813,7 +947,7 @@ export default function Canvas({
     return { x: screenX, y: screenY };
   }, [selectedImage, scale, panOffset]);
 
-  const cursorClass = activeTool === 'hand' ? 'cursor-grab' : 'cursor-crosshair';
+  const cursorClass = activeTool === 'hand' ? 'cursor-grab' : activeTool === 'select' && pastePreview ? 'cursor-copy' : 'cursor-crosshair';
 
   return (
     <div className="fixed inset-0 overflow-hidden">
@@ -880,6 +1014,26 @@ export default function Canvas({
       )}
     </div>
   );
+}
+
+function offsetStrokeForPreview(stroke: Stroke, dx: number, dy: number): Stroke {
+  switch (stroke.type) {
+    case 'freehand':
+    case 'marker':
+      return { ...stroke, points: stroke.points.map(p => ({ x: p.x + dx, y: p.y + dy, pressure: p.pressure })) };
+    case 'line':
+    case 'rect':
+    case 'triangle':
+      return {
+        ...stroke,
+        start: { x: stroke.start.x + dx, y: stroke.start.y + dy, pressure: stroke.start.pressure },
+        end: { x: stroke.end.x + dx, y: stroke.end.y + dy, pressure: stroke.end.pressure },
+      };
+    case 'ellipse':
+      return { ...stroke, center: { x: stroke.center.x + dx, y: stroke.center.y + dy, pressure: stroke.center.pressure } };
+    case 'image':
+      return { ...stroke, x: stroke.x + dx, y: stroke.y + dy };
+  }
 }
 
 function distPointToSegment(p: Point, a: Point, b: Point): number {

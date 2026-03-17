@@ -21,6 +21,8 @@ interface ToolbarProps {
   onExportPng: () => void;
   onExportPdf: () => void;
   onShowCheatsheet: () => void;
+  onSnippetPanelToggle: () => void;
+  snippetPanelOpen: boolean;
   canUndo: boolean;
   canRedo: boolean;
 }
@@ -64,6 +66,8 @@ export default function Toolbar({
   onExportPng,
   onExportPdf,
   onShowCheatsheet,
+  onSnippetPanelToggle,
+  snippetPanelOpen,
   canUndo,
   canRedo,
 }: ToolbarProps) {
@@ -137,6 +141,11 @@ export default function Toolbar({
       {/* Eraser */}
       <ToolBtn active={activeTool === 'eraser'} onClick={() => onToolChange('eraser')} title="Eraser (E)">
         <EraserIcon />
+      </ToolBtn>
+
+      {/* Select */}
+      <ToolBtn active={activeTool === 'select'} onClick={() => onToolChange('select')} title="Select (S)">
+        <SelectIcon />
       </ToolBtn>
 
       {/* Shapes (grouped with flyout) */}
@@ -241,6 +250,11 @@ export default function Toolbar({
       {/* Import file */}
       <ToolBtn active={false} onClick={onImportFile} title="Import file (Ctrl+Shift+I)">
         <PaperclipIcon />
+      </ToolBtn>
+
+      {/* Snippets */}
+      <ToolBtn active={snippetPanelOpen} onClick={onSnippetPanelToggle} title="Snippets">
+        <SnippetsIcon />
       </ToolBtn>
 
       {/* === MORE MENU === */}
@@ -437,4 +451,10 @@ function DotBgIcon() {
 }
 function RuledBgIcon() {
   return (<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="0.7" opacity="0.6"><line x1="1" y1="4" x2="15" y2="4" /><line x1="1" y1="7" x2="15" y2="7" /><line x1="1" y1="10" x2="15" y2="10" /><line x1="1" y1="13" x2="15" y2="13" /><line x1="4" y1="1" x2="4" y2="15" strokeWidth="1" opacity="0.4" /></svg>);
+}
+function SelectIcon() {
+  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="4 2"><rect x="3" y="3" width="18" height="18" rx="1" /></svg>);
+}
+function SnippetsIcon() {
+  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="2" width="14" height="14" rx="2" /><path d="M4 8H2v14a2 2 0 0 0 2 2h14v-2" /></svg>);
 }

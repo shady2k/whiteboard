@@ -88,7 +88,7 @@ export interface Session {
   updatedAt: string;
 }
 
-export type ToolType = 'pen' | 'marker' | 'eraser' | 'hand' | 'line' | 'rect' | 'triangle' | 'ellipse';
+export type ToolType = 'pen' | 'marker' | 'eraser' | 'hand' | 'line' | 'rect' | 'triangle' | 'ellipse' | 'select';
 
 export type Command =
   | { type: 'createStroke'; pageId: string; stroke: Stroke }
@@ -99,7 +99,9 @@ export type Command =
   | { type: 'deletePage'; page: Page; index: number }
   | { type: 'setPageBackground'; pageId: string; oldPattern: BackgroundPattern; oldColor: string; newPattern: BackgroundPattern; newColor: string }
   | { type: 'pasteImage'; pageId: string; stroke: ImageStroke }
-  | { type: 'transformImageStroke'; pageId: string; strokeId: string; oldStroke: ImageStroke; newStroke: ImageStroke };
+  | { type: 'transformImageStroke'; pageId: string; strokeId: string; oldStroke: ImageStroke; newStroke: ImageStroke }
+  | { type: 'pasteSnippet'; pageId: string; strokes: Stroke[] }
+  | { type: 'deleteSelected'; pageId: string; strokes: Stroke[] };
 
 export interface DirtyPage {
   pageId: string;
@@ -121,7 +123,18 @@ export interface AssetMapping {
   remoteId: string;
 }
 
-export type PendingActionType = 'assetUpload' | 'pageSync' | 'backgroundSync' | 'thumbnailSync' | 'sessionCreate' | 'sessionDelete' | 'sessionRename';
+export type PendingActionType = 'assetUpload' | 'pageSync' | 'backgroundSync' | 'thumbnailSync' | 'sessionCreate' | 'sessionDelete' | 'sessionRename' | 'snippetCreate' | 'snippetDelete';
+
+export interface Snippet {
+  id: string;
+  name: string;
+  strokes: Stroke[];
+  width: number;
+  height: number;
+  thumbnail: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface PendingAction {
   actionId: string;
