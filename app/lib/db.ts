@@ -74,6 +74,11 @@ function initSchema(db: Database.Database) {
     db.exec("ALTER TABLE sessions ADD COLUMN thumbnail TEXT DEFAULT NULL");
   }
 
+  // Migration: add deleted_at column for soft delete
+  if (!cols.some(c => c.name === 'deleted_at')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN deleted_at TEXT DEFAULT NULL");
+  }
+
   // Migration: add snippets table
   db.exec(`
     CREATE TABLE IF NOT EXISTS snippets (

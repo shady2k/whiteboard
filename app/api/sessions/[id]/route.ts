@@ -46,26 +46,41 @@ export async function PUT(
   return NextResponse.json({ ok: true });
 }
 
-// DELETE /api/sessions/:id — delete session and all its data
+// DELETE /api/sessions/:id — soft-delete session
 export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  const db = getDb();
+  const url = new URL(request.url);
+  const hard = url.searchParams.get('hard') === '1';
+
+  if (hard) {
+    // Hard delete: remove data and clean up assets
+    const assetIds = getSessionAssetIds(id);
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+    if (assetIds.length > 0) {
+      const { cleanupOrphanedAssets } = await import('@/app/lib/assetCleanup');
+      cleanupOrphanedAssets(assetIds);
+    }
+  } else {
+    // Soft delete: mark as deleted
+    const now = new Date().toISOString();
+    db.prepare('UPDATE sessions SET deleted_at = ? WHERE id = ?').run(now, id);
+  }
+
+  return NextResponse.json({ ok: true });
+}
+
+// PATCH /api/sessions/:id — restore soft-deleted session
+export async function PATCH(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   const db = getDb();
-
-  // Collect asset IDs referenced by this session's strokes
-  const assetIds = getSessionAssetIds(id);
-
-  // Delete session (cascades to pages and strokes)
-  db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
-
-  // Clean up assets that are no longer referenced by any remaining stroke
-  if (assetIds.length > 0) {
-    const { cleanupOrphanedAssets } = await import('@/app/lib/assetCleanup');
-    cleanupOrphanedAssets(assetIds);
-  }
-
+  db.prepare('UPDATE sessions SET deleted_at = NULL WHERE id = ?').run(id);
   return NextResponse.json({ ok: true });
 }
 

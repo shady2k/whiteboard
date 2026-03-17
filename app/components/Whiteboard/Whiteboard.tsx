@@ -84,10 +84,18 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const pageRef = useRef(page);
   pageRef.current = page;
 
-  // Generate and save thumbnail
-  const thumbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Generate thumbnail: save to IDB immediately, debounce only the server sync.
+  // This ensures the session list always has a fresh thumbnail from IDB even if
+  // the user navigates away before the server sync fires.
+  const thumbSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastThumbRef = useRef<string | null>(null);
   const generateAndSaveThumbRef = useRef<() => void>(null);
+
   const generateAndSaveThumb = useCallback(() => {
+    // Skip generating a blank thumbnail when there are no strokes —
+    // otherwise the empty thumbnail gets synced to the server and overwrites
+    // any future thumbnail that hasn't been synced yet.
+    if (strokesRef.current.length === 0) return;
     try {
       const canvas = document.createElement('canvas');
       const vw = window.innerWidth;
@@ -104,34 +112,47 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         generateAndSaveThumbRef.current?.();
       });
       const dataUrl = canvas.toDataURL('image/png', 0.7);
-      // Always save thumbnail to IDB so the session list shows current preview
+      lastThumbRef.current = dataUrl;
+
+      // Save to IDB immediately (no debounce) so it's available on navigation
       getSession(sessionId).then(s => {
         if (s) putSession({ ...s, thumbnail: dataUrl }).catch(() => {});
       }).catch(() => {});
-      tryThumbnailSync(dataUrl);
+
+      // Debounce server sync only
+      if (thumbSyncTimerRef.current) clearTimeout(thumbSyncTimerRef.current);
+      thumbSyncTimerRef.current = setTimeout(() => {
+        tryThumbnailSync(dataUrl);
+        thumbSyncTimerRef.current = null;
+      }, 2000);
     } catch {}
   }, [sessionId, page, tryThumbnailSync]);
   useEffect(() => { generateAndSaveThumbRef.current = generateAndSaveThumb; }, [generateAndSaveThumb]);
 
-  const saveThumbnail = useCallback(() => {
-    if (thumbTimerRef.current) clearTimeout(thumbTimerRef.current);
-    thumbTimerRef.current = setTimeout(generateAndSaveThumb, 2000);
-  }, [generateAndSaveThumb]);
-
   useEffect(() => {
-    saveThumbnail();
-  }, [strokes, saveThumbnail, page?.backgroundPattern, page?.backgroundColor]);
+    generateAndSaveThumb();
+  }, [strokes, generateAndSaveThumb, page?.backgroundPattern, page?.backgroundColor]);
 
-  // Flush pending thumbnail immediately on unmount
+  // Flush pending server sync on unmount / page hide
   useEffect(() => {
-    return () => {
-      if (thumbTimerRef.current) {
-        clearTimeout(thumbTimerRef.current);
-        thumbTimerRef.current = null;
-        generateAndSaveThumbRef.current?.();
+    const flushServerSync = () => {
+      if (thumbSyncTimerRef.current && lastThumbRef.current) {
+        clearTimeout(thumbSyncTimerRef.current);
+        thumbSyncTimerRef.current = null;
+        tryThumbnailSync(lastThumbRef.current);
       }
     };
-  }, []);
+    const handleVisChange = () => {
+      if (document.visibilityState === 'hidden') flushServerSync();
+    };
+    document.addEventListener('visibilitychange', handleVisChange);
+    window.addEventListener('pagehide', flushServerSync);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisChange);
+      window.removeEventListener('pagehide', flushServerSync);
+      flushServerSync();
+    };
+  }, [tryThumbnailSync]);
 
   const updatePageStrokes = useCallback((pageId: string, updater: (strokes: Stroke[]) => Stroke[]) => {
     setPage(prev => {

@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { v4 as uuidv4 } from 'uuid';
+import { getAllSessions as getAllIdbSessions } from '@/app/lib/idb';
 
 interface SessionSummary {
   id: string;
@@ -16,6 +17,12 @@ interface SessionSummary {
   bg_pattern: string | null;
 }
 
+interface Toast {
+  message: string;
+  undoData: { ids: string[]; sessions: SessionSummary[] };
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export default function SessionList() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -24,14 +31,34 @@ export default function SessionList() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [toast, setToast] = useState<Toast | null>(null);
+  const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
   const editRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const toastRef = useRef<Toast | null>(null);
   const router = useRouter();
+
+  const selectMode = selected.size > 0;
 
   const fetchSessions = () =>
     fetch('/api/sessions')
       .then(r => r.json())
-      .then((data: SessionSummary[]) => {
+      .then(async (data: SessionSummary[]) => {
+        // IDB thumbnails are saved immediately (no debounce) so they're
+        // always more up-to-date than the server's debounced copy.
+        // Prefer the IDB thumbnail whenever one exists.
+        try {
+          const idbSessions = await getAllIdbSessions();
+          const idbMap = new Map(idbSessions.map(s => [s.id, s.thumbnail]));
+          for (const s of data) {
+            const idbThumb = idbMap.get(s.id);
+            if (idbThumb) {
+              s.thumbnail = idbThumb;
+            }
+          }
+        } catch { /* IDB unavailable */ }
         setSessions(data);
         setLoaded(true);
       })
@@ -59,6 +86,45 @@ export default function SessionList() {
     return () => document.removeEventListener('mousedown', handler);
   }, [menuId]);
 
+  // Esc to exit selection, Delete/Backspace to delete selected
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectMode) {
+        e.preventDefault();
+        setSelected(new Set());
+        setShowDeleteDialog(false);
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectMode && !editingId) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        e.preventDefault();
+        setShowDeleteDialog(true);
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [selectMode, editingId]);
+
+  // On unmount: commit any pending hard-deletes
+  useEffect(() => {
+    return () => {
+      const pending = toastRef.current;
+      if (pending) {
+        clearTimeout(pending.timer);
+        const ids = pending.undoData.ids;
+        if (ids.length === 1) {
+          fetch(`/api/sessions/${ids[0]}?hard=1`, { method: 'DELETE' });
+        } else {
+          fetch('/api/sessions/batch', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids, hard: true }),
+          });
+        }
+      }
+    };
+  }, []);
+
   const createSession = async () => {
     const sessionId = uuidv4();
     const pageId = uuidv4();
@@ -79,18 +145,15 @@ export default function SessionList() {
     setMenuId(null);
     setConfirmDeleteId(null);
 
-    // Optimistic UI removal
+    const removed = sessions.filter(s => s.id === id);
     setSessions(prev => prev.filter(s => s.id !== id));
 
+    // Soft-delete on server immediately
     try {
-      const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
-      if (!res.ok && res.status !== 404) {
-        // Restore on failure
-        fetchSessions();
-      }
-    } catch {
-      fetchSessions();
-    }
+      await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+    } catch { /* network error */ }
+
+    showUndoToast([id], removed);
   };
 
   const cloneSession = async (id: string) => {
@@ -116,7 +179,6 @@ export default function SessionList() {
     if (!editingId) return;
     const trimmed = editValue.trim();
     if (trimmed) {
-      // Optimistic UI update
       setSessions(prev => prev.map(s => s.id === editingId ? { ...s, name: trimmed } : s));
 
       try {
@@ -125,10 +187,7 @@ export default function SessionList() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: trimmed }),
         });
-        if (!res.ok) {
-          // Restore on failure
-          fetchSessions();
-        }
+        if (!res.ok) fetchSessions();
       } catch {
         fetchSessions();
       }
@@ -136,10 +195,150 @@ export default function SessionList() {
     setEditingId(null);
   };
 
-  const openSession = (id: string) => {
+  const handleCardClick = useCallback((id: string, e: React.MouseEvent) => {
     if (editingId || menuId) return;
+
+    const metaSelect = e.metaKey || e.ctrlKey;
+    const shiftSelect = e.shiftKey;
+
+    if (metaSelect || selectMode) {
+      // Cmd/Ctrl+click toggles individual selection
+      if (shiftSelect && lastSelectedId) {
+        // Shift+click selects range
+        const ids = sessions.map(s => s.id);
+        const from = ids.indexOf(lastSelectedId);
+        const to = ids.indexOf(id);
+        if (from !== -1 && to !== -1) {
+          const start = Math.min(from, to);
+          const end = Math.max(from, to);
+          const rangeIds = ids.slice(start, end + 1);
+          setSelected(prev => {
+            const next = new Set(prev);
+            rangeIds.forEach(rid => next.add(rid));
+            return next;
+          });
+        }
+      } else {
+        setSelected(prev => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      }
+      setLastSelectedId(id);
+      return;
+    }
+
+    if (shiftSelect && !selectMode) {
+      // Shift+click with nothing selected starts range from this item
+      setSelected(new Set([id]));
+      setLastSelectedId(id);
+      return;
+    }
+
+    // Normal click — navigate
     setNavigatingId(id);
     window.location.href = `/session/${id}`;
+  }, [editingId, menuId, selectMode, lastSelectedId, sessions]);
+
+  const toggleSelectAll = () => {
+    if (selected.size === sessions.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(sessions.map(s => s.id)));
+    }
+  };
+
+  const hardDeleteIds = async (ids: string[]) => {
+    try {
+      if (ids.length === 1) {
+        await fetch(`/api/sessions/${ids[0]}?hard=1`, { method: 'DELETE' });
+      } else {
+        await fetch('/api/sessions/batch', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids, hard: true }),
+        });
+      }
+    } catch { /* network error */ }
+  };
+
+  const restoreIds = async (ids: string[]) => {
+    try {
+      if (ids.length === 1) {
+        await fetch(`/api/sessions/${ids[0]}`, { method: 'PATCH' });
+      } else {
+        await fetch('/api/sessions/batch', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        });
+      }
+    } catch { /* network error */ }
+  };
+
+  const showUndoToast = (ids: string[], removedSessions: SessionSummary[]) => {
+    // Clear any existing toast & hard-delete its pending items
+    if (toastRef.current) {
+      clearTimeout(toastRef.current.timer);
+      hardDeleteIds(toastRef.current.undoData.ids);
+    }
+
+    const timer = setTimeout(() => {
+      setToast(null);
+      toastRef.current = null;
+      // Undo window expired — hard delete
+      hardDeleteIds(ids);
+    }, 5000);
+
+    const t: Toast = {
+      message: ids.length === 1
+        ? '1 whiteboard deleted'
+        : `${ids.length} whiteboards deleted`,
+      undoData: { ids, sessions: removedSessions },
+      timer,
+    };
+    toastRef.current = t;
+    setToast(t);
+  };
+
+  const undoDelete = async () => {
+    if (!toast) return;
+    clearTimeout(toast.timer);
+    // Restore on server
+    await restoreIds(toast.undoData.ids);
+    // Restore in UI
+    setSessions(prev => {
+      const existing = new Set(prev.map(s => s.id));
+      const restored = toast.undoData.sessions.filter(s => !existing.has(s.id));
+      const merged = [...prev, ...restored];
+      merged.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+      return merged;
+    });
+    setToast(null);
+    toastRef.current = null;
+  };
+
+  const bulkDelete = async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+
+    const removed = sessions.filter(s => selected.has(s.id));
+    setSessions(prev => prev.filter(s => !selected.has(s.id)));
+    setSelected(new Set());
+    setShowDeleteDialog(false);
+
+    // Soft-delete on server immediately
+    try {
+      await fetch('/api/sessions/batch', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+    } catch { /* network error */ }
+
+    showUndoToast(ids, removed);
   };
 
   const formatDate = (iso: string) => {
@@ -180,7 +379,7 @@ export default function SessionList() {
           </button>
         </div>
 
-        {/* Content — no spinner, just fade in */}
+        {/* Content */}
         <div
           className="transition-opacity duration-300"
           style={{ opacity: loaded ? 1 : 0 }}
@@ -211,10 +410,13 @@ export default function SessionList() {
                   isMenuOpen={menuId === session.id}
                   isEditing={editingId === session.id}
                   isConfirmingDelete={confirmDeleteId === session.id}
+                  selectMode={selectMode}
+                  isSelected={selected.has(session.id)}
                   editValue={editValue}
                   editRef={editRef}
                   menuRef={menuRef}
-                  onOpen={() => openSession(session.id)}
+                  onOpen={(e) => handleCardClick(session.id, e)}
+                  onToggleSelect={() => { setSelected(prev => { const next = new Set(prev); if (next.has(session.id)) next.delete(session.id); else next.add(session.id); return next; }); setLastSelectedId(session.id); }}
                   onMenuToggle={() => setMenuId(menuId === session.id ? null : session.id)}
                   onRename={() => startRename(session.id, session.name)}
                   onClone={() => cloneSession(session.id)}
@@ -231,20 +433,136 @@ export default function SessionList() {
           )}
         </div>
       </div>
+
+      {/* Floating action bar */}
+      {selectMode && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-slide-up">
+          <div className="flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-neutral-900/95 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/50">
+            <span className="text-sm text-neutral-300 font-medium tabular-nums">
+              {selected.size} selected
+            </span>
+
+            <div className="w-px h-5 bg-white/10" />
+
+            <button
+              onClick={toggleSelectAll}
+              className="px-3 py-1.5 rounded-lg text-sm text-neutral-300 bg-transparent border-none cursor-pointer transition-colors hover:bg-white/10"
+            >
+              {selected.size === sessions.length ? 'Deselect all' : 'Select all'}
+            </button>
+
+            <button
+              onClick={() => setShowDeleteDialog(true)}
+              className="px-3 py-1.5 rounded-lg text-sm text-red-400 font-medium bg-transparent border-none cursor-pointer transition-colors hover:bg-red-500/15 flex items-center gap-1.5"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+              </svg>
+              Delete
+            </button>
+
+            <div className="w-px h-5 bg-white/10" />
+
+            <button
+              onClick={() => { setSelected(new Set()); setShowDeleteDialog(false); }}
+              className="px-3 py-1.5 rounded-lg text-sm text-neutral-400 bg-transparent border-none cursor-pointer transition-colors hover:bg-white/10"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirmation dialog */}
+      {showDeleteDialog && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in"
+          onClick={() => setShowDeleteDialog(false)}
+        >
+          <div
+            className="bg-neutral-900 border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 animate-scale-in"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-red-500/15 flex items-center justify-center flex-shrink-0">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-white font-semibold text-base">Delete {selected.size} {selected.size === 1 ? 'whiteboard' : 'whiteboards'}?</h3>
+              </div>
+            </div>
+            <p className="text-neutral-400 text-sm mb-5 ml-[52px]">
+              {selected.size === 1 ? 'This whiteboard' : 'These whiteboards'} will be deleted. You can undo this action for a few seconds after.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setShowDeleteDialog(false)}
+                className="px-4 py-2 rounded-lg text-sm text-neutral-300 bg-white/10 border-none cursor-pointer transition-colors hover:bg-white/15"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={bulkDelete}
+                className="px-4 py-2 rounded-lg text-sm text-white font-medium bg-red-600 border-none cursor-pointer transition-colors hover:bg-red-500"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Undo toast */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[70] animate-slide-up">
+          <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-neutral-800/95 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/50">
+            <span className="text-sm text-neutral-200">{toast.message}</span>
+            <button
+              onClick={undoDelete}
+              className="px-3 py-1 rounded-md text-sm font-medium text-blue-400 bg-blue-500/15 border-none cursor-pointer transition-colors hover:bg-blue-500/25"
+            >
+              Undo
+            </button>
+          </div>
+        </div>
+      )}
+
+      <style jsx global>{`
+        @keyframes slide-up {
+          from { opacity: 0; transform: translate(-50%, 16px); }
+          to { opacity: 1; transform: translate(-50%, 0); }
+        }
+        @keyframes fade-in {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes scale-in {
+          from { opacity: 0; transform: scale(0.95); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        .animate-slide-up { animation: slide-up 0.2s ease-out; }
+        .animate-fade-in { animation: fade-in 0.15s ease-out; }
+        .animate-scale-in { animation: scale-in 0.15s ease-out; }
+      `}</style>
     </div>
   );
 }
 
-function SessionCard({ session, isNavigating, isMenuOpen, isEditing, isConfirmingDelete, editValue, editRef, menuRef, onOpen, onMenuToggle, onRename, onClone, onDelete, onConfirmDelete, onCancelDelete, onEditChange, onEditCommit, onEditCancel, formatDate }: {
+function SessionCard({ session, isNavigating, isMenuOpen, isEditing, isConfirmingDelete, selectMode, isSelected, editValue, editRef, menuRef, onOpen, onToggleSelect, onMenuToggle, onRename, onClone, onDelete, onConfirmDelete, onCancelDelete, onEditChange, onEditCommit, onEditCancel, formatDate }: {
   session: SessionSummary;
   isNavigating: boolean;
   isMenuOpen: boolean;
   isEditing: boolean;
   isConfirmingDelete: boolean;
+  selectMode: boolean;
+  isSelected: boolean;
   editValue: string;
   editRef: React.RefObject<HTMLInputElement | null>;
   menuRef: React.RefObject<HTMLDivElement | null>;
-  onOpen: () => void;
+  onOpen: (e: React.MouseEvent) => void;
+  onToggleSelect: () => void;
   onMenuToggle: () => void;
   onRename: () => void;
   onClone: () => void;
@@ -258,8 +576,12 @@ function SessionCard({ session, isNavigating, isMenuOpen, isEditing, isConfirmin
 }) {
   return (
     <div
-      className={`group relative rounded-xl border border-white/8 bg-white/5 cursor-pointer transition-all duration-200 hover:border-white/15 hover:bg-white/8 hover:shadow-lg hover:shadow-black/30 hover:-translate-y-0.5 overflow-hidden ${
+      className={`group relative rounded-xl border cursor-pointer transition-all duration-200 hover:shadow-lg hover:shadow-black/30 hover:-translate-y-0.5 overflow-hidden ${
         isNavigating ? 'opacity-70 pointer-events-none scale-[0.98]' : ''
+      } ${
+        isSelected
+          ? 'border-blue-500 bg-blue-500/10 ring-2 ring-blue-500/40'
+          : 'border-white/8 bg-white/5 hover:border-white/15 hover:bg-white/8'
       }`}
       onClick={onOpen}
     >
@@ -286,71 +608,92 @@ function SessionCard({ session, isNavigating, isMenuOpen, isEditing, isConfirmin
           </div>
         )}
 
-        <div className="absolute top-2 right-2">
-          <button
-            className="w-7 h-7 rounded-md flex items-center justify-center bg-black/30 backdrop-blur-sm text-white/70 text-xs cursor-pointer transition-all hover:bg-black/50 hover:text-white border-none opacity-0 group-hover:opacity-100"
-            onClick={(e) => { e.stopPropagation(); onMenuToggle(); }}
-            title="Options"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" />
-            </svg>
-          </button>
+        {/* Checkbox — click directly to toggle selection without navigating */}
+        <button
+          className={`absolute top-2 left-2 z-10 transition-opacity p-0 bg-transparent border-none cursor-pointer ${selectMode ? 'opacity-100' : 'opacity-0 group-hover:opacity-60'}`}
+          onClick={(e) => { e.stopPropagation(); onToggleSelect(); }}
+          title="Select"
+        >
+          <div className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all ${
+            isSelected
+              ? 'bg-blue-600 border-blue-600'
+              : 'bg-black/30 border-white/40 backdrop-blur-sm'
+          }`}>
+            {isSelected && (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            )}
+          </div>
+        </button>
 
-          {isMenuOpen && (
-            <div
-              ref={menuRef}
-              className="absolute right-0 top-8 bg-neutral-800/95 backdrop-blur-md border border-white/10 rounded-lg shadow-xl py-1 min-w-[140px] z-10 animate-menu-in"
-              onClick={(e) => e.stopPropagation()}
+        {!selectMode && (
+          <div className="absolute top-2 right-2">
+            <button
+              className="w-7 h-7 rounded-md flex items-center justify-center bg-black/30 backdrop-blur-sm text-white/70 text-xs cursor-pointer transition-all hover:bg-black/50 hover:text-white border-none opacity-0 group-hover:opacity-100"
+              onClick={(e) => { e.stopPropagation(); onMenuToggle(); }}
+              title="Options"
             >
-              <button
-                className="w-full px-3 py-1.5 text-left text-sm text-neutral-300 bg-transparent border-none cursor-pointer hover:bg-white/10 flex items-center gap-2"
-                onClick={onRename}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" />
+              </svg>
+            </button>
+
+            {isMenuOpen && (
+              <div
+                ref={menuRef}
+                className="absolute right-0 top-8 bg-neutral-800/95 backdrop-blur-md border border-white/10 rounded-lg shadow-xl py-1 min-w-[140px] z-10 animate-menu-in"
+                onClick={(e) => e.stopPropagation()}
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                </svg>
-                Rename
-              </button>
-              <button
-                className="w-full px-3 py-1.5 text-left text-sm text-neutral-300 bg-transparent border-none cursor-pointer hover:bg-white/10 flex items-center gap-2"
-                onClick={onClone}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                </svg>
-                Clone
-              </button>
-              <div className="h-px bg-white/10 my-1" />
-              {isConfirmingDelete ? (
-                <div className="flex items-center gap-1 px-2 py-1">
-                  <button
-                    className="flex-1 px-2 py-1.5 text-xs text-red-400 font-medium bg-red-500/15 border border-red-500/30 rounded cursor-pointer hover:bg-red-500/25 transition-colors"
-                    onClick={onDelete}
-                  >
-                    Delete
-                  </button>
-                  <button
-                    className="flex-1 px-2 py-1.5 text-xs text-neutral-400 bg-transparent border border-white/10 rounded cursor-pointer hover:bg-white/10 transition-colors"
-                    onClick={onCancelDelete}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
                 <button
-                  className="w-full px-3 py-1.5 text-left text-sm text-red-400 bg-transparent border-none cursor-pointer hover:bg-red-500/10 flex items-center gap-2"
-                  onClick={onConfirmDelete}
+                  className="w-full px-3 py-1.5 text-left text-sm text-neutral-300 bg-transparent border-none cursor-pointer hover:bg-white/10 flex items-center gap-2"
+                  onClick={onRename}
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                    <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
                   </svg>
-                  Delete
+                  Rename
                 </button>
-              )}
-            </div>
-          )}
-        </div>
+                <button
+                  className="w-full px-3 py-1.5 text-left text-sm text-neutral-300 bg-transparent border-none cursor-pointer hover:bg-white/10 flex items-center gap-2"
+                  onClick={onClone}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                  Clone
+                </button>
+                <div className="h-px bg-white/10 my-1" />
+                {isConfirmingDelete ? (
+                  <div className="flex items-center gap-1 px-2 py-1">
+                    <button
+                      className="flex-1 px-2 py-1.5 text-xs text-red-400 font-medium bg-red-500/15 border border-red-500/30 rounded cursor-pointer hover:bg-red-500/25 transition-colors"
+                      onClick={onDelete}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      className="flex-1 px-2 py-1.5 text-xs text-neutral-400 bg-transparent border border-white/10 rounded cursor-pointer hover:bg-white/10 transition-colors"
+                      onClick={onCancelDelete}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="w-full px-3 py-1.5 text-left text-sm text-red-400 bg-transparent border-none cursor-pointer hover:bg-red-500/10 flex items-center gap-2"
+                    onClick={onConfirmDelete}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                    </svg>
+                    Delete
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="p-3">

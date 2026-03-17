@@ -12,6 +12,7 @@ export async function GET() {
            (SELECT pp.background_pattern FROM pages pp WHERE pp.session_id = s.id ORDER BY pp.position LIMIT 1) as bg_pattern
     FROM sessions s
     LEFT JOIN pages p ON p.session_id = s.id
+    WHERE s.deleted_at IS NULL
     GROUP BY s.id
     ORDER BY s.updated_at DESC
   `).all();
