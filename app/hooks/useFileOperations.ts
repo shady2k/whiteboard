@@ -34,13 +34,16 @@ interface UseFileOperationsArgs {
   strokes: Stroke[];
   sessionName: string;
   handleStrokeComplete: (stroke: Stroke) => void;
+  screenToCanvas: (sx: number, sy: number) => { x: number; y: number };
+  mouseRef: React.RefObject<{ x: number; y: number }>;
 }
 
-export function useFileOperations({ page, strokes, sessionName, handleStrokeComplete }: UseFileOperationsArgs) {
+export function useFileOperations({ page, strokes, sessionName, handleStrokeComplete, screenToCanvas, mouseRef }: UseFileOperationsArgs) {
   const [pdfPageDialog, setPdfPageDialog] = useState<{ pdf: import('pdfjs-dist').PDFDocumentProxy; numPages: number } | null>(null);
 
   // Upload image — offline-capable with stable local IDs
-  const uploadAndCreateImageStroke = useCallback(async (file: File | Blob, mimeType?: string): Promise<ImageStroke | null> => {
+  // screenPos: optional screen coordinates to place the image at (defaults to current mouse position)
+  const uploadAndCreateImageStroke = useCallback(async (file: File | Blob, mimeType?: string, screenPos?: { x: number; y: number }): Promise<ImageStroke | null> => {
     const pageId = page?.id;
     if (!pageId) return null;
 
@@ -71,8 +74,11 @@ export function useFileOperations({ page, strokes, sessionName, handleStrokeComp
       if (w > maxW) { h *= maxW / w; w = maxW; }
       if (h > maxH) { w *= maxH / h; h = maxH; }
 
-      const x = (window.innerWidth - w) / 2;
-      const y = (window.innerHeight - h) / 2;
+      // Place at cursor position (screen coords → canvas coords), centered on cursor
+      const pos = screenPos ?? mouseRef.current;
+      const canvasPos = screenToCanvas(pos.x, pos.y);
+      const x = canvasPos.x - w / 2;
+      const y = canvasPos.y - h / 2;
 
       const stroke: ImageStroke = {
         type: 'image',
@@ -88,7 +94,7 @@ export function useFileOperations({ page, strokes, sessionName, handleStrokeComp
       console.error('Failed to create image stroke:', e);
       return null;
     }
-  }, [page?.id]);
+  }, [page?.id, screenToCanvas, mouseRef]);
 
   // Clipboard paste handler
   useEffect(() => {
@@ -188,9 +194,10 @@ export function useFileOperations({ page, strokes, sessionName, handleStrokeComp
       const files = e.dataTransfer?.files;
       if (!files?.length) return;
 
+      const dropPos = { x: e.clientX, y: e.clientY };
       for (const file of Array.from(files)) {
         if (file.type.startsWith('image/')) {
-          const stroke = await uploadAndCreateImageStroke(file);
+          const stroke = await uploadAndCreateImageStroke(file, undefined, dropPos);
           if (stroke) handleStrokeComplete(stroke);
         } else if (file.type === 'application/pdf') {
           try {

@@ -1,21 +1,17 @@
 'use client';
 
 import { useState, useCallback, useEffect, useRef, useMemo, startTransition } from 'react';
-import { Stroke, ToolType, StrokeStyle, Page, BackgroundPattern, ImageStroke, Snippet } from '@/app/types';
+import { Stroke, ToolType, StrokeStyle, Page, BackgroundPattern, ImageStroke } from '@/app/types';
 import Canvas from '@/app/components/Canvas/Canvas';
 import Toolbar from '@/app/components/Toolbar/Toolbar';
-import PageNav from '@/app/components/PageNav/PageNav';
-import SnippetSaveDialog from '@/app/components/SnippetSaveDialog';
-import SnippetPanel from '@/app/components/SnippetPanel';
 import { useIDBState } from '@/app/hooks/useIDBState';
 import { useSyncEngine } from '@/app/hooks/useSyncEngine';
-import { useSnippetSync } from '@/app/hooks/useSnippetSync';
 import { useUndoRedo } from '@/app/hooks/useUndoRedo';
 import { getSession, putSession } from '@/app/lib/idb';
 import { useFileOperations } from '@/app/hooks/useFileOperations';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { renderAllStrokes } from '@/app/utils/renderStroke';
-import { createSnippet, denormalizeStrokes, generateSnippetThumbnail, normalizeStrokes } from '@/app/utils/snippetUtils';
+import { normalizeStrokes, denormalizeStrokes } from '@/app/utils/snippetUtils';
 import Image from 'next/image';
 
 interface WhiteboardProps {
@@ -26,6 +22,12 @@ interface WhiteboardProps {
 }
 
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+
+const DEFAULT_PEN_CONFIGS = [
+  { color: '#000000', label: 'Black', baseWidth: 4 },
+  { color: '#e53e3e', label: 'Red', baseWidth: 4 },
+  { color: '#3182ce', label: 'Blue', baseWidth: 4 },
+];
 
 export default function Whiteboard({ sessionId, initialPages, sessionName: initialName, serverSessionExists }: WhiteboardProps) {
   const { page, setPage, isOffline, notFound } = useIDBState(sessionId, initialPages, initialName, serverSessionExists);
@@ -40,14 +42,21 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
   const [sessionName] = useState(initialName);
   const [activeTool, setActiveTool] = useState<ToolType>('pen');
-  const [strokeStyle, setStrokeStyle] = useState<StrokeStyle>({
-    color: '#000000',
-    baseWidth: 4,
-  });
+
+  // Per-color pen configs: each color has its own independent thickness
+  const [penConfigs, setPenConfigs] = useState(DEFAULT_PEN_CONFIGS);
+  const [activePenColor, setActivePenColor] = useState('#000000');
   const [markerStyle, setMarkerStyle] = useState<StrokeStyle>({
-    color: '#facc15',
+    color: '#7dd3fc',
     baseWidth: 24,
   });
+
+  // Derive current stroke style from active pen config (or marker)
+  const strokeStyle = useMemo<StrokeStyle>(() => {
+    if (activeTool === 'marker') return markerStyle;
+    const config = penConfigs.find(p => p.color === activePenColor);
+    return config ? { color: config.color, baseWidth: config.baseWidth } : { color: '#000000', baseWidth: 4 };
+  }, [penConfigs, activePenColor, activeTool, markerStyle]);
   const [zoom, setZoom] = useState(() => {
     if (typeof sessionStorage === 'undefined') return 1;
     const saved = sessionStorage.getItem(`wb-zoom-${sessionId}`);
@@ -69,13 +78,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     sessionStorage.setItem(`wb-pan-${sessionId}`, JSON.stringify(panOffset));
   }, [sessionId, panOffset]);
 
-  // Snippet state
-  const { snippets, saveSnippet, deleteSnippet } = useSnippetSync();
-  const [snippetPanelOpen, setSnippetPanelOpen] = useState(false);
-  const [pendingSelection, setPendingSelection] = useState<{ strokes: Stroke[]; bounds: { x: number; y: number; width: number; height: number } } | null>(null);
-  const [snippetSaveDialog, setSnippetSaveDialog] = useState(false);
-  const [pasteSnippet, setPasteSnippet] = useState<Snippet | null>(null);
-
   const strokes = useMemo(() => page?.strokes ?? [], [page?.strokes]);
 
   const strokesRef = useRef(strokes);
@@ -85,16 +87,11 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   pageRef.current = page;
 
   // Generate thumbnail: save to IDB immediately, debounce only the server sync.
-  // This ensures the session list always has a fresh thumbnail from IDB even if
-  // the user navigates away before the server sync fires.
   const thumbSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastThumbRef = useRef<string | null>(null);
   const generateAndSaveThumbRef = useRef<() => void>(null);
 
   const generateAndSaveThumb = useCallback(() => {
-    // Skip generating a blank thumbnail when there are no strokes —
-    // otherwise the empty thumbnail gets synced to the server and overwrites
-    // any future thumbnail that hasn't been synced yet.
     if (strokesRef.current.length === 0) return;
     try {
       const canvas = document.createElement('canvas');
@@ -114,12 +111,10 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       const dataUrl = canvas.toDataURL('image/png', 0.7);
       lastThumbRef.current = dataUrl;
 
-      // Save to IDB immediately (no debounce) so it's available on navigation
       getSession(sessionId).then(s => {
         if (s) putSession({ ...s, thumbnail: dataUrl }).catch(() => {});
       }).catch(() => {});
 
-      // Debounce server sync only
       if (thumbSyncTimerRef.current) clearTimeout(thumbSyncTimerRef.current);
       thumbSyncTimerRef.current = setTimeout(() => {
         tryThumbnailSync(dataUrl);
@@ -178,11 +173,36 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
   }, [page?.id, updatePageStrokes, pushCommand, queuePageSync]);
 
+  // Refs for viewport transform (used by screenToCanvas, paste, keyboard shortcuts)
+  const scaleRef = useRef(zoom);
+  useEffect(() => { scaleRef.current = zoom; }, [zoom]);
+  const panOffsetRef = useRef(panOffset);
+  useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
+
+  // Track mouse position for paste/drop at cursor
+  const mouseRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => { mouseRef.current = { x: e.clientX, y: e.clientY }; };
+    window.addEventListener('pointermove', onMove);
+    return () => window.removeEventListener('pointermove', onMove);
+  }, []);
+
+  const screenToCanvas = useCallback((sx: number, sy: number) => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const s = scaleRef.current;
+    const panX = (vw / 2) * (1 - s) + panOffsetRef.current.x;
+    const panY = (vh / 2) * (1 - s) + panOffsetRef.current.y;
+    return { x: (sx - panX) / s, y: (sy - panY) / s };
+  }, []);
+
   const { handleImportFile, handleExportPng, handleExportPdf, pdfPageDialog, setPdfPageDialog, importPdfPages } = useFileOperations({
     page,
     strokes,
     sessionName,
     handleStrokeComplete,
+    screenToCanvas,
+    mouseRef,
   });
 
   const handleStrokeDelete = useCallback((strokeId: string) => {
@@ -198,7 +218,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const handleEraseCommit = useCallback((erased: { strokeId: string; remaining: Stroke[] }[]) => {
     const pageId = page?.id;
     if (!pageId) return;
-    // Build undo data: capture original strokes before replacing
     const undoData = erased.map(({ strokeId, remaining }) => {
       const original = strokes.find(s => s.id === strokeId);
       return { strokeId, original: original!, remaining };
@@ -208,7 +227,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       for (const { strokeId, remaining } of erased) {
         const idx = newStrokes.findIndex(s => s.id === strokeId);
         if (idx === -1) continue;
-        // Replace the original stroke with its remaining fragments
         newStrokes.splice(idx, 1, ...remaining);
       }
       return { ...prev, strokes: newStrokes };
@@ -273,14 +291,14 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const deleteSelectionRef = useRef<(() => void) | null>(null);
   const pasteFromClipboardRef = useRef<(() => void) | null>(null);
   const clipboardRef = useRef<Stroke[] | null>(null);
+
+  const [pendingSelection, setPendingSelection] = useState<{ strokes: Stroke[]; bounds: { x: number; y: number; width: number; height: number } } | null>(null);
   const pendingSelectionRef = useRef(pendingSelection);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isCmd = e.metaKey || e.ctrlKey;
-
-      // Skip clipboard/selection shortcuts if user is typing in an input
       const isEditing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
 
       if (isCmd && e.key === 'c' && !e.shiftKey && !isEditing) {
@@ -290,7 +308,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         }
         return;
       } else if (isCmd && e.key === 'v' && !e.shiftKey && !isEditing) {
-        // Only intercept if we have a stroke clipboard; let default paste handle images
         if (clipboardRef.current) {
           e.preventDefault();
           pasteFromClipboardRef.current?.();
@@ -331,8 +348,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         e.preventDefault();
         setShowCheatsheet(v => {
           if (v) return false;
-          // Cancel snippet paste or selection
-          setPasteSnippet(null);
           setPendingSelection(null);
           setActiveTool('pen');
           return false;
@@ -340,14 +355,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
         e.preventDefault();
         setShowCheatsheet(v => !v);
-      } else if (e.key === '1' && !isCmd) {
-        setStrokeStyle(s => ({ ...s, baseWidth: 2 }));
-      } else if (e.key === '2' && !isCmd) {
-        setStrokeStyle(s => ({ ...s, baseWidth: 4 }));
-      } else if (e.key === '3' && !isCmd) {
-        setStrokeStyle(s => ({ ...s, baseWidth: 8 }));
-      } else if (e.key === '4' && !isCmd) {
-        setStrokeStyle(s => ({ ...s, baseWidth: 16 }));
       } else if (!isCmd && !e.altKey && !e.shiftKey) {
         switch (e.key.toLowerCase()) {
           case 'p': setActiveTool('pen'); break;
@@ -358,6 +365,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
           case 'r': setActiveTool('rect'); break;
           case 't': setActiveTool('triangle'); break;
           case 'o': setActiveTool('ellipse'); break;
+          case 'a': setActiveTool('axes'); break;
           case 's': setActiveTool('select'); break;
         }
       }
@@ -384,17 +392,14 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   // Clipboard for copy/paste of strokes
   const [clipboard, setClipboard] = useState<Stroke[] | null>(null);
 
-  // Selection complete handler — just store selection, show action bar
   const handleSelectionComplete = useCallback((selectedStrokes: Stroke[], bounds: { x: number; y: number; width: number; height: number }) => {
     setPendingSelection({ strokes: selectedStrokes, bounds });
   }, []);
 
-  // Clear selection
   const clearSelection = useCallback(() => {
     setPendingSelection(null);
   }, []);
 
-  // Copy selected strokes to clipboard
   const copySelection = useCallback(() => {
     if (!pendingSelection) return;
     const { normalized } = normalizeStrokes(pendingSelection.strokes);
@@ -402,7 +407,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     setPendingSelection(null);
   }, [pendingSelection]);
 
-  // Delete selected strokes
   const deleteSelection = useCallback(() => {
     if (!pendingSelection || !page) return;
     const ids = new Set(pendingSelection.strokes.map(s => s.id));
@@ -412,71 +416,19 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     setPendingSelection(null);
   }, [pendingSelection, page, pushCommand, updatePageStrokes, queuePageSync]);
 
-  // Save selection as snippet
-  const saveSelectionAsSnippet = useCallback(() => {
-    if (!pendingSelection) return;
-    setSnippetSaveDialog(true);
-  }, [pendingSelection]);
-
-  // Save snippet handler
-  const handleSnippetSave = useCallback((name: string) => {
-    if (!pendingSelection) return;
-    const snippet = createSnippet(name, pendingSelection.strokes);
-    saveSnippet(snippet);
-    setPendingSelection(null);
-    setSnippetSaveDialog(false);
-  }, [pendingSelection, saveSnippet]);
-
   // Paste from clipboard at mouse cursor position
   const pasteFromClipboard = useCallback(() => {
     if (!clipboard || !page) return;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
     const { normalized, width, height } = normalizeStrokes(clipboard);
-    const s = scaleRef.current;
-    const panX = (vw / 2) * (1 - s) + panOffsetRef.current.x;
-    const panY = (vh / 2) * (1 - s) + panOffsetRef.current.y;
-    // Convert mouse screen position to canvas coordinates
-    const canvasX = (mouseRef.current.x - panX) / s - width / 2;
-    const canvasY = (mouseRef.current.y - panY) / s - height / 2;
+    const center = screenToCanvas(mouseRef.current.x, mouseRef.current.y);
+    const canvasX = center.x - width / 2;
+    const canvasY = center.y - height / 2;
     const newStrokes = denormalizeStrokes(normalized, canvasX, canvasY);
     setPage(prev => ({ ...prev, strokes: [...prev.strokes, ...newStrokes] }));
     pushCommand({ type: 'pasteSnippet', pageId: page.id, strokes: newStrokes });
     setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
-  }, [clipboard, page, setPage, pushCommand, queuePageSync]);
+  }, [clipboard, page, setPage, pushCommand, queuePageSync, screenToCanvas]);
 
-  // Track mouse position for paste-at-cursor
-  const mouseRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  useEffect(() => {
-    const onMove = (e: PointerEvent) => { mouseRef.current = { x: e.clientX, y: e.clientY }; };
-    window.addEventListener('pointermove', onMove);
-    return () => window.removeEventListener('pointermove', onMove);
-  }, []);
-
-  // Refs for keyboard shortcut access
-  const scaleRef = useRef(zoom);
-  useEffect(() => { scaleRef.current = zoom; }, [zoom]);
-  const panOffsetRef = useRef(panOffset);
-  useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
-
-  // Paste confirm handler (for snippet paste preview mode)
-  const handlePasteConfirm = useCallback((targetX: number, targetY: number) => {
-    if (!pasteSnippet || !page) return;
-    const offsetX = targetX - pasteSnippet.width / 2;
-    const offsetY = targetY - pasteSnippet.height / 2;
-    const newStrokes = denormalizeStrokes(pasteSnippet.strokes, offsetX, offsetY);
-    setPage(prev => ({ ...prev, strokes: [...prev.strokes, ...newStrokes] }));
-    pushCommand({ type: 'pasteSnippet', pageId: page.id, strokes: newStrokes });
-    setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
-    setPasteSnippet(null);
-  }, [pasteSnippet, page, setPage, pushCommand, queuePageSync]);
-
-  // Start paste mode from snippet panel
-  const handleSnippetPaste = useCallback((snippet: Snippet) => {
-    setPasteSnippet(snippet);
-    setSnippetPanelOpen(false);
-    setActiveTool('select');
-  }, []);
 
   // Keep refs updated for keyboard shortcuts
   useEffect(() => { copySelectionRef.current = copySelection; }, [copySelection]);
@@ -487,6 +439,17 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
   const handleZoomChange = useCallback((z: number) => startTransition(() => setZoom(z)), []);
   const handlePanChange = useCallback((p: { x: number; y: number }) => startTransition(() => setPanOffset(p)), []);
+
+  // Pen selection handler — switch to pen tool and set active color
+  const handlePenSelect = useCallback((color: string) => {
+    setActivePenColor(color);
+    setActiveTool('pen');
+  }, []);
+
+  // Per-pen width change
+  const handlePenWidthChange = useCallback((color: string, width: number) => {
+    setPenConfigs(prev => prev.map(p => p.color === color ? { ...p, baseWidth: width } : p));
+  }, []);
 
   if (notFound) {
     return (
@@ -521,7 +484,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       <Canvas
         strokes={strokes}
         activeTool={activeTool}
-        strokeStyle={activeTool === 'marker' ? markerStyle : strokeStyle}
+        strokeStyle={strokeStyle}
         backgroundColor={page.backgroundColor}
         backgroundPattern={page.backgroundPattern}
         scale={zoom}
@@ -534,36 +497,32 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         onZoomChange={handleZoomChange}
         onPanChange={handlePanChange}
         onSelectionComplete={handleSelectionComplete}
-        pastePreview={pasteSnippet}
-        onPasteConfirm={handlePasteConfirm}
+        pastePreview={null}
+        onPasteConfirm={() => {}}
         selectionActive={!!pendingSelection}
       />
       {/* Selection action bar */}
-      {pendingSelection && activeTool === 'select' && !pasteSnippet && (
+      {pendingSelection && activeTool === 'select' && (
         <SelectionActionBar
           bounds={pendingSelection.bounds}
           zoom={zoom}
           panOffset={panOffset}
           onCopy={copySelection}
           onDelete={deleteSelection}
-          onSaveSnippet={saveSelectionAsSnippet}
         />
       )}
       <Toolbar
         activeTool={activeTool}
-        strokeStyle={strokeStyle}
+        activePenColor={activePenColor}
+        penConfigs={penConfigs}
         markerStyle={markerStyle}
         backgroundPattern={page.backgroundPattern}
         backgroundColor={page.backgroundColor}
+        zoom={zoom}
         onToolChange={setActiveTool}
-        onColorChange={color => {
-          if (activeTool === 'marker') setMarkerStyle(s => ({ ...s, color }));
-          else setStrokeStyle(s => ({ ...s, color }));
-        }}
-        onWidthChange={baseWidth => {
-          if (activeTool === 'marker') setMarkerStyle(s => ({ ...s, baseWidth }));
-          else setStrokeStyle(s => ({ ...s, baseWidth }));
-        }}
+        onPenSelect={handlePenSelect}
+        onPenWidthChange={handlePenWidthChange}
+        onMarkerWidthChange={(w) => setMarkerStyle(s => ({ ...s, baseWidth: w }))}
         onBackgroundPatternChange={handleBackgroundPatternChange}
         onBackgroundColorChange={handleBackgroundColorChange}
         onUndo={undo}
@@ -573,20 +532,11 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         onExportPng={handleExportPng}
         onExportPdf={handleExportPdf}
         onShowCheatsheet={() => setShowCheatsheet(true)}
-        onSnippetPanelToggle={() => setSnippetPanelOpen(v => !v)}
-        snippetPanelOpen={snippetPanelOpen}
-        canUndo={canUndo}
-        canRedo={canRedo}
-      />
-      <PageNav
-        sessionName={sessionName}
-        zoom={zoom}
         onZoomIn={zoomIn}
         onZoomOut={zoomOut}
         onZoomReset={zoomReset}
-        strokes={strokes}
-        backgroundPattern={page.backgroundPattern}
-        backgroundColor={page.backgroundColor}
+        canUndo={canUndo}
+        canRedo={canRedo}
         isOffline={isOffline || !isOnline}
       />
       {pdfPageDialog && (
@@ -601,25 +551,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         />
       )}
       {showCheatsheet && <Cheatsheet onClose={() => setShowCheatsheet(false)} />}
-      {snippetPanelOpen && (
-        <SnippetPanel
-          snippets={snippets}
-          onPaste={handleSnippetPaste}
-          onDelete={deleteSnippet}
-          onClose={() => setSnippetPanelOpen(false)}
-        />
-      )}
-      {snippetSaveDialog && pendingSelection && (
-        <SnippetSaveDialog
-          thumbnail={(() => {
-            const { normalized, width, height } = normalizeStrokes(pendingSelection.strokes);
-            return generateSnippetThumbnail(normalized, width, height);
-          })()}
-          strokeCount={pendingSelection.strokes.length}
-          onSave={handleSnippetSave}
-          onCancel={() => { setSnippetSaveDialog(false); setPendingSelection(null); }}
-        />
-      )}
     </>
   );
 }
@@ -628,13 +559,12 @@ const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigat
 const MOD = isMac ? '\u2318' : 'Ctrl';
 const SHIFT = isMac ? '\u21E7' : 'Shift';
 
-function SelectionActionBar({ bounds, zoom, panOffset, onCopy, onDelete, onSaveSnippet }: {
+function SelectionActionBar({ bounds, zoom, panOffset, onCopy, onDelete }: {
   bounds: { x: number; y: number; width: number; height: number };
   zoom: number;
   panOffset: { x: number; y: number };
   onCopy: () => void;
   onDelete: () => void;
-  onSaveSnippet: () => void;
 }) {
   const w = typeof window !== 'undefined' ? window.innerWidth : 0;
   const h = typeof window !== 'undefined' ? window.innerHeight : 0;
@@ -651,8 +581,6 @@ function SelectionActionBar({ bounds, zoom, panOffset, onCopy, onDelete, onSaveS
     >
       <SelectActionBtn onClick={onCopy} title={`Copy (${isMac ? '\u2318' : 'Ctrl'}+C)`} icon={<CopyIcon />} label="Copy" />
       <SelectActionBtn onClick={onDelete} title="Delete" icon={<DeleteIcon />} label="Delete" danger />
-      <div className="w-px h-5 bg-white/15 mx-0.5" />
-      <SelectActionBtn onClick={onSaveSnippet} title="Save as Snippet" icon={<SnippetSaveIcon />} label="Snippet" />
     </div>
   );
 }
@@ -679,10 +607,6 @@ function CopyIcon() {
 
 function DeleteIcon() {
   return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>);
-}
-
-function SnippetSaveIcon() {
-  return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="2" width="14" height="14" rx="2" /><path d="M4 8H2v14a2 2 0 0 0 2 2h14v-2" /></svg>);
 }
 
 function Kbd({ children }: { children: React.ReactNode }) {
@@ -728,23 +652,15 @@ function Cheatsheet({ onClose }: { onClose: () => void }) {
             <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Tools</div>
             <ShortcutRow keys={['H']} label="Hand / Pan" />
             <ShortcutRow keys={['P']} label="Pen" />
-            <ShortcutRow keys={['M']} label="Marker" />
+            <ShortcutRow keys={['M']} label="Highlighter" />
             <ShortcutRow keys={['E']} label="Eraser" />
             <ShortcutRow keys={['L']} label="Line" />
             <ShortcutRow keys={['R']} label="Rectangle" />
             <ShortcutRow keys={['T']} label="Triangle" />
             <ShortcutRow keys={['O']} label="Ellipse" />
+            <ShortcutRow keys={['A']} label="Axes" />
             <ShortcutRow keys={['S']} label="Select" />
             <ShortcutRow keys={['Esc']} label="Back to Pen" />
-          </div>
-
-          {/* Stroke width */}
-          <div>
-            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Stroke Width</div>
-            <ShortcutRow keys={['1']} label="Thin (2px)" />
-            <ShortcutRow keys={['2']} label="Normal (4px)" />
-            <ShortcutRow keys={['3']} label="Thick (8px)" />
-            <ShortcutRow keys={['4']} label="Heavy (16px)" />
           </div>
 
           {/* Navigation */}

@@ -40,6 +40,16 @@ const PEN_OPTIONS = {
   last: true,
 };
 
+const SHAPE_OPTIONS = {
+  thinning: 0,
+  smoothing: 0,
+  streamline: 0,
+  simulatePressure: false,
+  start: { taper: false, cap: true },
+  end: { taper: false, cap: true },
+  last: true,
+};
+
 const MARKER_OPTIONS = {
   thinning: 0,        // uniform width — markers don't taper
   smoothing: 0.5,
@@ -65,9 +75,10 @@ export function drawFreehandStroke(
     return;
   }
 
+  const opts = stroke.geometric ? SHAPE_OPTIONS : PEN_OPTIONS;
   const outline = getStroke(pointsToInput(points), {
     size: style.baseWidth,
-    ...PEN_OPTIONS,
+    ...opts,
   });
 
   fillOutline(ctx, outline, style.color);

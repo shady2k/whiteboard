@@ -5,11 +5,11 @@ import { useLatestRef } from '@/app/hooks/useLatestRef';
 import { Point, Stroke, FreehandStroke, MarkerStroke, ImageStroke, StrokeStyle, ToolType, BackgroundPattern, Snippet } from '@/app/types';
 import { drawFreehandPoints, drawMarkerPoints } from '@/app/utils/drawStroke';
 import { renderStroke, renderAllStrokes } from '@/app/utils/renderStroke';
-import { drawLinePreview, drawRectPreview, drawEllipsePreview, drawTrianglePreview } from '@/app/utils/drawShape';
+import { drawLinePreview, drawRectPreview, drawEllipsePreview, drawTrianglePreview, drawAxesPreview, shapeToPointGroups } from '@/app/utils/drawShape';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { snapLineEnd, snapRectEnd, snapEllipseEnd } from '@/app/utils/snapShape';
 import { getCachedImage } from '@/app/utils/imageCache';
-import { strokeIntersectsRect, findStrokeAtPoint as findStrokeAtPointUtil, partialEraseStroke, distPointToSegment } from '@/app/utils/strokeBounds';
+import { strokeIntersectsRect, findStrokeAtPoint as findStrokeAtPointUtil, computeEraseResult } from '@/app/utils/strokeBounds';
 import { offsetStroke } from '@/app/utils/strokeTransform';
 import { useImageDrag } from '@/app/hooks/useImageDrag';
 import { v4 as uuidv4 } from 'uuid';
@@ -85,8 +85,11 @@ export default function Canvas({
   const onStrokeCompleteRef = useLatestRef(onStrokeComplete);
   const onStrokeDeleteRef = useLatestRef(onStrokeDelete);
   const onEraseCommitRef = useLatestRef(onEraseCommit);
-  // Track eraser path during a drag — collect all eraser positions, commit on mouseup
-  const eraserPointsRef = useRef<Point[]>([]);
+  // Track eraser path during a drag — collect positions with per-point radius, commit on mouseup
+  const eraserPointsRef = useRef<{ point: Point; radius: number }[]>([]);
+  const lastEraserTimeRef = useRef(0);
+  const lastEraserPosRef = useRef<{ x: number; y: number } | null>(null);
+  const eraserVelocityRef = useRef(0); // smoothed velocity in canvas-space px/ms
   const onImageTransformRef = useLatestRef(onImageTransform);
   const onToolChangeRef = useLatestRef(onToolChange);
   const onZoomChangeRef = useLatestRef(onZoomChange);
@@ -470,7 +473,11 @@ export default function Canvas({
       if (tool === 'pen' || tool === 'marker') {
         currentPointsRef.current = [point];
       } else if (tool === 'eraser') {
-        eraserPointsRef.current = [point];
+        const baseRadius = 10 / scaleRef.current;
+        eraserPointsRef.current = [{ point, radius: baseRadius }];
+        lastEraserTimeRef.current = performance.now();
+        lastEraserPosRef.current = { x: point.x, y: point.y };
+        eraserVelocityRef.current = 0;
       } else {
         startPointRef.current = point;
         currentPointRef.current = point;
@@ -649,11 +656,29 @@ export default function Canvas({
         });
       } else if (tool === 'eraser') {
         const point = getPoint(e);
-        eraserPointsRef.current.push(point);
+        // Compute velocity-based eraser radius
+        const now = performance.now();
+        const baseRadius = 10 / scaleRef.current;
+        const maxRadius = 60 / scaleRef.current;
+        let currentRadius = baseRadius;
+        if (lastEraserPosRef.current) {
+          const dx = point.x - lastEraserPosRef.current.x;
+          const dy = point.y - lastEraserPosRef.current.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const dt = Math.max(1, now - lastEraserTimeRef.current);
+          const velocity = dist / dt; // canvas-space px per ms
+          // Smooth the velocity
+          eraserVelocityRef.current = eraserVelocityRef.current * 0.6 + velocity * 0.4;
+          // Map velocity to radius: ramp up between 0.15 and 1.5 px/ms
+          const t = Math.min(1, Math.max(0, (eraserVelocityRef.current - 0.15) / 1.35));
+          currentRadius = baseRadius + (maxRadius - baseRadius) * t * t;
+        }
+        lastEraserTimeRef.current = now;
+        lastEraserPosRef.current = { x: point.x, y: point.y };
+        eraserPointsRef.current.push({ point, radius: currentRadius });
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = requestAnimationFrame(() => {
           // Redraw ink with erased areas hidden
-          const eraserRadius = 10 / scaleRef.current;
           const eraserPts = eraserPointsRef.current;
           const inkCtx = getCtx(inkCanvasRef.current);
           if (inkCtx) {
@@ -664,75 +689,27 @@ export default function Canvas({
             inkCtx.translate(panX, panY);
             inkCtx.scale(s, s);
             for (const stroke of strokesRef.current) {
-              // Check if this stroke is hit by any eraser point
-              if ((stroke.type === 'freehand' || stroke.type === 'marker') && stroke.points.length > 0) {
-                // Filter out erased points — check both point proximity and segment distance
-                const r2 = eraserRadius * eraserRadius;
-                const kept = stroke.points.filter((p, idx) => {
-                  for (const ep of eraserPts) {
-                    // Point-in-radius check
-                    const dx = p.x - ep.x;
-                    const dy = p.y - ep.y;
-                    if (dx * dx + dy * dy < r2) return false;
-                    // Segment-distance check: if eraser is close to segment ending at this point
-                    if (idx > 0) {
-                      const prev = stroke.points[idx - 1];
-                      if (distPointToSegment(ep, prev, p) < eraserRadius) return false;
-                    }
-                    if (idx < stroke.points.length - 1) {
-                      const next = stroke.points[idx + 1];
-                      if (distPointToSegment(ep, p, next) < eraserRadius) return false;
-                    }
-                  }
-                  return true;
-                });
-                if (kept.length >= 2) {
-                  // Render kept points as segments
-                  const segments: Point[][] = [];
-                  let seg: Point[] = [];
-                  const pointSet = new Set(kept);
-                  for (const p of stroke.points) {
-                    if (pointSet.has(p)) {
-                      seg.push(p);
-                    } else {
-                      if (seg.length >= 2) segments.push(seg);
-                      seg = [];
-                    }
-                  }
-                  if (seg.length >= 2) segments.push(seg);
-                  for (const s of segments) {
-                    const tmpStroke = { ...stroke, points: s, id: stroke.id };
-                    renderStroke(inkCtx, tmpStroke);
-                  }
-                } else if (kept.length === stroke.points.length) {
-                  renderStroke(inkCtx, stroke);
-                }
-                // else: fully erased, don't render
+              const result = computeEraseResult(stroke, eraserPts);
+              if (result === null) {
+                renderStroke(inkCtx, stroke);
               } else {
-                // Check if shape/image is hit
-                let shapeHit = false;
-                for (const ep of eraserPts) {
-                  if (partialEraseStroke(stroke, ep, eraserRadius) !== null) {
-                    shapeHit = true;
-                    break;
-                  }
-                }
-                if (!shapeHit) {
-                  renderStroke(inkCtx, stroke);
+                for (const fragment of result.remaining) {
+                  renderStroke(inkCtx, fragment);
                 }
               }
             }
             inkCtx.restore();
           }
-          // Draw eraser cursor on preview
+          // Draw eraser cursor on preview — size reflects current velocity-based radius
           clearPreview();
           const ctx = getCtx(previewCanvasRef.current);
           if (ctx) {
             const { panX, panY, scale: s } = getTransform();
             const screenX = point.x * s + panX;
             const screenY = point.y * s + panY;
+            const screenRadius = currentRadius * s;
             ctx.beginPath();
-            ctx.arc(screenX, screenY, 10, 0, Math.PI * 2);
+            ctx.arc(screenX, screenY, screenRadius, 0, Math.PI * 2);
             ctx.strokeStyle = '#999';
             ctx.lineWidth = 1;
             ctx.stroke();
@@ -762,6 +739,7 @@ export default function Canvas({
           else if (tool === 'rect') drawRectPreview(ctx, start, end, strokeStyleRef.current);
           else if (tool === 'triangle') drawTrianglePreview(ctx, start, end, strokeStyleRef.current);
           else if (tool === 'ellipse') drawEllipsePreview(ctx, start, end, strokeStyleRef.current);
+          else if (tool === 'axes') drawAxesPreview(ctx, start, end, strokeStyleRef.current);
           ctx.restore();
         });
       }
@@ -857,68 +835,12 @@ export default function Canvas({
       if (tool === 'eraser') {
         // Commit partial erase: compute splits for all affected strokes
         const eraserPts = eraserPointsRef.current;
-        const eraserRadius = 10 / scaleRef.current;
         if (eraserPts.length > 0 && onEraseCommitRef.current) {
           const results: { strokeId: string; remaining: Stroke[] }[] = [];
           for (const stroke of strokesRef.current) {
-            let hit = false;
-            if (stroke.type === 'freehand' || stroke.type === 'marker') {
-              // Collect all points to erase, checking both point proximity and segment distance
-              const r2 = eraserRadius * eraserRadius;
-              const erasedIndices = new Set<number>();
-              for (let i = 0; i < stroke.points.length; i++) {
-                const p = stroke.points[i];
-                for (const ep of eraserPts) {
-                  // Point-in-radius
-                  const dx = p.x - ep.x;
-                  const dy = p.y - ep.y;
-                  if (dx * dx + dy * dy < r2) {
-                    erasedIndices.add(i);
-                    break;
-                  }
-                  // Segment-distance: check segments adjacent to this point
-                  if (i > 0 && distPointToSegment(ep, stroke.points[i - 1], p) < eraserRadius) {
-                    erasedIndices.add(i);
-                    break;
-                  }
-                  if (i < stroke.points.length - 1 && distPointToSegment(ep, p, stroke.points[i + 1]) < eraserRadius) {
-                    erasedIndices.add(i);
-                    break;
-                  }
-                }
-              }
-              if (erasedIndices.size > 0) {
-                hit = true;
-                const segments: Point[][] = [];
-                let seg: Point[] = [];
-                for (let i = 0; i < stroke.points.length; i++) {
-                  if (!erasedIndices.has(i)) {
-                    seg.push(stroke.points[i]);
-                  } else {
-                    if (seg.length >= 2) segments.push(seg);
-                    seg = [];
-                  }
-                }
-                if (seg.length >= 2) segments.push(seg);
-                const remaining = segments.map((pts) => ({
-                  type: stroke.type,
-                  id: uuidv4(),
-                  points: pts,
-                  style: { ...stroke.style },
-                } as Stroke));
-                results.push({ strokeId: stroke.id, remaining });
-              }
-            } else {
-              // Shapes/images: check if any eraser point hits
-              for (const ep of eraserPts) {
-                if (partialEraseStroke(stroke, ep, eraserRadius) !== null) {
-                  hit = true;
-                  break;
-                }
-              }
-              if (hit) {
-                results.push({ strokeId: stroke.id, remaining: [] });
-              }
+            const result = computeEraseResult(stroke, eraserPts);
+            if (result) {
+              results.push({ strokeId: stroke.id, remaining: result.remaining });
             }
           }
           if (results.length > 0) {
@@ -938,7 +860,7 @@ export default function Canvas({
         drawCommittedStrokeToInk(stroke);
         currentPointsRef.current = [];
         clearPreview();
-      } else if (tool === 'line' || tool === 'rect' || tool === 'triangle' || tool === 'ellipse') {
+      } else if (tool === 'line' || tool === 'rect' || tool === 'triangle' || tool === 'ellipse' || tool === 'axes') {
         const start = startPointRef.current;
         let end = getPoint(e);
         if (start) {
@@ -948,19 +870,21 @@ export default function Canvas({
             else if (tool === 'ellipse') end = snapEllipseEnd(start, end);
           }
 
-          let stroke: Stroke;
-          if (tool === 'line') {
-            stroke = { type: 'line', id: uuidv4(), start, end, style: { ...style } };
-          } else if (tool === 'rect') {
-            stroke = { type: 'rect', id: uuidv4(), start, end, style: { ...style } };
-          } else if (tool === 'triangle') {
-            stroke = { type: 'triangle', id: uuidv4(), start, end, style: { ...style } };
+          const pointGroups = shapeToPointGroups(tool, start, end, style.baseWidth);
+          if (pointGroups) {
+            // Converted to freehand strokes (line, rect, triangle, ellipse)
+            for (const pts of pointGroups) {
+              if (pts.length < 2) continue;
+              const stroke: FreehandStroke = { type: 'freehand', id: uuidv4(), points: pts, style: { ...style }, geometric: true };
+              onStrokeCompleteRef.current(stroke);
+              drawCommittedStrokeToInk(stroke);
+            }
           } else {
-            const cx = (start.x + end.x) / 2, cy = (start.y + end.y) / 2;
-            stroke = { type: 'ellipse', id: uuidv4(), center: { x: cx, y: cy, pressure: start.pressure }, radiusX: Math.abs(end.x - start.x) / 2, radiusY: Math.abs(end.y - start.y) / 2, style: { ...style } };
+            // Stays as shape type (axes)
+            const stroke: Stroke = { type: 'axes', id: uuidv4(), start, end, style: { ...style } };
+            onStrokeCompleteRef.current(stroke);
+            drawCommittedStrokeToInk(stroke);
           }
-          onStrokeCompleteRef.current(stroke);
-          drawCommittedStrokeToInk(stroke);
         }
         startPointRef.current = null;
         currentPointRef.current = null;

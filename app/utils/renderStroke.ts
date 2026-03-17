@@ -1,6 +1,6 @@
 import { Stroke, ImageStroke } from '@/app/types';
 import { drawFreehandStroke, drawMarkerStroke } from './drawStroke';
-import { drawLineStroke, drawRectStroke, drawTriangleStroke, drawEllipseStroke } from './drawShape';
+import { drawLineStroke, drawRectStroke, drawTriangleStroke, drawEllipseStroke, drawAxesStroke } from './drawShape';
 import { getCachedImage, loadImage } from './imageCache';
 
 export function renderStroke(
@@ -26,6 +26,9 @@ export function renderStroke(
       break;
     case 'ellipse':
       drawEllipseStroke(ctx, stroke);
+      break;
+    case 'axes':
+      drawAxesStroke(ctx, stroke);
       break;
     case 'image':
       drawImageStroke(ctx, stroke, onImageLoad);

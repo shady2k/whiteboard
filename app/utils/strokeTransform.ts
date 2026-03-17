@@ -15,6 +15,7 @@ export function offsetStroke(stroke: Stroke, dx: number, dy: number): Stroke {
     case 'line':
     case 'rect':
     case 'triangle':
+    case 'axes':
       return {
         ...stroke,
         start: { x: stroke.start.x + dx, y: stroke.start.y + dy, pressure: stroke.start.pressure },

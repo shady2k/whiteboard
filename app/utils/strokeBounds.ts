@@ -24,6 +24,7 @@ export function getStrokeBounds(stroke: Stroke): BoundingBox {
     case 'line':
     case 'rect':
     case 'triangle':
+    case 'axes':
       return {
         minX: Math.min(stroke.start.x, stroke.end.x),
         minY: Math.min(stroke.start.y, stroke.end.y),
@@ -90,6 +91,18 @@ export function findStrokeAtPoint(p: Point, strokes: Stroke[], eraserRadius: num
       for (let j = 0; j < 3; j++) {
         if (distPointToSegment(p, tri[j], tri[(j + 1) % 3]) < eraserRadius) return stroke.id;
       }
+    } else if (stroke.type === 'axes') {
+      const x = Math.min(stroke.start.x, stroke.end.x);
+      const y = Math.min(stroke.start.y, stroke.end.y);
+      const w = Math.abs(stroke.end.x - stroke.start.x);
+      const h = Math.abs(stroke.end.y - stroke.start.y);
+      const cx = x + w / 2, cy = y + h / 2;
+      const xLeft = { x, y: cy, pressure: 0 } as Point;
+      const xRight = { x: x + w, y: cy, pressure: 0 } as Point;
+      const yTop = { x: cx, y, pressure: 0 } as Point;
+      const yBottom = { x: cx, y: y + h, pressure: 0 } as Point;
+      if (distPointToSegment(p, xLeft, xRight) < eraserRadius) return stroke.id;
+      if (distPointToSegment(p, yTop, yBottom) < eraserRadius) return stroke.id;
     } else if (stroke.type === 'ellipse') {
       const s = stroke;
       const dx = (p.x - s.center.x) / s.radiusX;
@@ -144,6 +157,16 @@ export function partialEraseStroke(
     for (let j = 0; j < 3; j++) {
       if (distPointToSegment(eraserPos, tri[j], tri[(j + 1) % 3]) < eraserRadius) return [];
     }
+  } else if (stroke.type === 'axes') {
+    const x = Math.min(stroke.start.x, stroke.end.x);
+    const y = Math.min(stroke.start.y, stroke.end.y);
+    const w = Math.abs(stroke.end.x - stroke.start.x);
+    const h = Math.abs(stroke.end.y - stroke.start.y);
+    const origin = { x, y: y + h, pressure: 0 } as Point;
+    const xEnd = { x: x + w, y: y + h, pressure: 0 } as Point;
+    const yEnd = { x, y, pressure: 0 } as Point;
+    if (distPointToSegment(eraserPos, origin, xEnd) < eraserRadius) return [];
+    if (distPointToSegment(eraserPos, origin, yEnd) < eraserRadius) return [];
   } else if (stroke.type === 'ellipse') {
     const dx = (eraserPos.x - stroke.center.x) / stroke.radiusX;
     const dy = (eraserPos.y - stroke.center.y) / stroke.radiusY;
@@ -210,10 +233,74 @@ function partialEraseFreehand(
   } as FreehandStroke | MarkerStroke));
 }
 
-export function strokeIntersectsRect(stroke: Stroke, rect: BoundingBox): boolean {
-  // Skip image strokes — not included in snippets
-  if (stroke.type === 'image') return false;
+export interface EraserPoint {
+  point: Point;
+  radius: number;
+}
 
+/**
+ * Compute erase results for a single stroke against a set of eraser points.
+ * Returns null if no hit. Returns { hit: true, remaining: Stroke[] } otherwise.
+ * For freehand/marker strokes, remaining contains the surviving fragments.
+ * For shapes/images, remaining is empty (whole stroke deleted).
+ */
+export function computeEraseResult(
+  stroke: Stroke,
+  eraserPts: EraserPoint[],
+): { hit: true; remaining: Stroke[] } | null {
+  if ((stroke.type === 'freehand' || stroke.type === 'marker') && stroke.points.length > 0) {
+    const erasedIndices = new Set<number>();
+    for (let i = 0; i < stroke.points.length; i++) {
+      const p = stroke.points[i];
+      for (const { point: ep, radius: er } of eraserPts) {
+        const r2 = er * er;
+        const dx = p.x - ep.x;
+        const dy = p.y - ep.y;
+        if (dx * dx + dy * dy < r2) {
+          erasedIndices.add(i);
+          break;
+        }
+        if (i > 0 && distPointToSegment(ep, stroke.points[i - 1], p) < er) {
+          erasedIndices.add(i);
+          break;
+        }
+        if (i < stroke.points.length - 1 && distPointToSegment(ep, p, stroke.points[i + 1]) < er) {
+          erasedIndices.add(i);
+          break;
+        }
+      }
+    }
+    if (erasedIndices.size === 0) return null;
+    const segments: Point[][] = [];
+    let seg: Point[] = [];
+    for (let i = 0; i < stroke.points.length; i++) {
+      if (!erasedIndices.has(i)) {
+        seg.push(stroke.points[i]);
+      } else {
+        if (seg.length >= 2) segments.push(seg);
+        seg = [];
+      }
+    }
+    if (seg.length >= 2) segments.push(seg);
+    const remaining = segments.map((pts) => ({
+      type: stroke.type,
+      id: uuidv4(),
+      points: pts,
+      style: { ...stroke.style },
+    } as Stroke));
+    return { hit: true, remaining };
+  }
+
+  // Shapes/images: delete whole object
+  for (const { point: ep, radius: er } of eraserPts) {
+    if (partialEraseStroke(stroke, ep, er) !== null) {
+      return { hit: true, remaining: [] };
+    }
+  }
+  return null;
+}
+
+export function strokeIntersectsRect(stroke: Stroke, rect: BoundingBox): boolean {
   const bounds = getStrokeBounds(stroke);
 
   // For freehand/marker, also check if any individual point falls in the rect

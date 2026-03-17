@@ -14,6 +14,7 @@ export interface FreehandStroke {
   id: string;
   points: Point[];
   style: StrokeStyle;
+  geometric?: boolean; // true for shape-converted strokes (uniform width, no smoothing)
 }
 
 export interface LineStroke {
@@ -49,6 +50,14 @@ export interface TriangleStroke {
   style: StrokeStyle;
 }
 
+export interface AxesStroke {
+  type: 'axes';
+  id: string;
+  start: Point;
+  end: Point;
+  style: StrokeStyle;
+}
+
 export interface MarkerStroke {
   type: 'marker';
   id: string;
@@ -67,7 +76,7 @@ export interface ImageStroke {
   opacity?: number; // 0-1, default 1
 }
 
-export type Stroke = FreehandStroke | MarkerStroke | LineStroke | RectStroke | TriangleStroke | EllipseStroke | ImageStroke;
+export type Stroke = FreehandStroke | MarkerStroke | LineStroke | RectStroke | TriangleStroke | EllipseStroke | AxesStroke | ImageStroke;
 
 export type BackgroundPattern = 'blank' | 'grid' | 'dotgrid' | 'ruled';
 
@@ -88,7 +97,7 @@ export interface Session {
   updatedAt: string;
 }
 
-export type ToolType = 'pen' | 'marker' | 'eraser' | 'hand' | 'line' | 'rect' | 'triangle' | 'ellipse' | 'select';
+export type ToolType = 'pen' | 'marker' | 'eraser' | 'hand' | 'line' | 'rect' | 'triangle' | 'ellipse' | 'axes' | 'select';
 
 export type Command =
   | { type: 'createStroke'; pageId: string; stroke: Stroke }
