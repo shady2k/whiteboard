@@ -124,7 +124,7 @@ export interface AssetMapping {
   remoteId: string;
 }
 
-export type PendingActionType = 'assetUpload' | 'pageSync' | 'backgroundSync' | 'thumbnailSync' | 'sessionCreate' | 'sessionDelete' | 'sessionRename' | 'snippetCreate' | 'snippetDelete';
+export type PendingActionType = 'assetUpload' | 'pageSync' | 'backgroundSync' | 'thumbnailSync' | 'snippetCreate' | 'snippetDelete';
 
 export interface Snippet {
   id: string;

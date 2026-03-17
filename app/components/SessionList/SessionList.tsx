@@ -3,12 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { getAllSessions, getSession, putSession, putPage, putPendingAction, getPendingActions, clearPendingAction, getPagesBySession } from '@/app/lib/idb';
-import { replaySessionActions } from '@/app/lib/replayPendingActions';
 import { v4 as uuidv4 } from 'uuid';
-import type { Page } from '@/app/types';
-import WhiteboardLoader from '@/app/components/Whiteboard/WhiteboardLoader';
-import { useOnlineStatus } from '@/app/hooks/useOnlineStatus';
 
 interface SessionSummary {
   id: string;
@@ -24,101 +19,25 @@ interface SessionSummary {
 export default function SessionList() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const isOffline = !useOnlineStatus();
   const [navigatingId, setNavigatingId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
-  const [offlineSessionId, setOfflineSessionId] = useState<string | null>(null);
   const editRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
-  useEffect(() => {
-    // Load from IDB first for instant display
-    getAllSessions().then(idbSessions => {
-      if (idbSessions.length > 0) {
-        const mapped: SessionSummary[] = idbSessions.map(s => ({
-          id: s.id,
-          name: s.name,
-          created_at: s.createdAt,
-          updated_at: s.updatedAt,
-          page_count: 0,
-          thumbnail: s.thumbnail,
-          bg_color: null,
-          bg_pattern: null,
-        }));
-        setSessions(mapped);
-        setLoaded(true);
-      }
-    }).catch(() => {});
-
-    // Then fetch from server and merge with IDB sessions
+  const fetchSessions = () =>
     fetch('/api/sessions')
       .then(r => r.json())
-      .then(async (serverData: SessionSummary[]) => {
-        // Merge: server sessions + any IDB-only sessions (e.g. created offline)
-        const serverIds = new Set(serverData.map((s: SessionSummary) => s.id));
-        const idbSessions = await getAllSessions();
-        const idbOnly = idbSessions
-          .filter(s => !serverIds.has(s.id))
-          .map(s => ({
-            id: s.id,
-            name: s.name,
-            created_at: s.createdAt,
-            updated_at: s.updatedAt,
-            page_count: 0,
-            thumbnail: s.thumbnail,
-            bg_color: null,
-            bg_pattern: null,
-          } as SessionSummary));
-
-        setSessions([...serverData, ...idbOnly]);
+      .then((data: SessionSummary[]) => {
+        setSessions(data);
         setLoaded(true);
-
-        // Update IDB cache with server data
-        for (const s of serverData) {
-          putSession({
-            id: s.id,
-            name: s.name,
-            createdAt: s.created_at,
-            updatedAt: s.updated_at,
-            thumbnail: s.thumbnail,
-          }).catch(() => {});
-        }
-
-        // Pre-cache page data for sessions that don't have pages in IDB yet.
-        // This ensures offline access to session content.
-        for (const s of serverData) {
-          getPagesBySession(s.id).then(async (idbPages) => {
-            if (idbPages.length > 0) return; // already cached
-            try {
-              const dataRes = await fetch(`/api/sessions/${s.id}/data`);
-              if (!dataRes.ok) return;
-              const data = await dataRes.json();
-              for (const sp of (data.pages || [])) {
-                const page: Page = {
-                  id: sp.id,
-                  sessionId: sp.session_id,
-                  position: sp.position,
-                  backgroundPattern: sp.background_pattern,
-                  backgroundColor: sp.background_color,
-                  strokes: (sp.strokes || []).map((st: Record<string, unknown>) => ({ ...st })),
-                };
-                await putPage(page, 0);
-              }
-            } catch { /* non-critical background caching */ }
-          }).catch(() => {});
-        }
       })
       .catch(() => setLoaded(true));
-  }, []);
 
-  // Replay pending actions when coming back online.
-  useEffect(() => {
-    if (!isOffline) replaySessionActions();
-  }, [isOffline]);
+  useEffect(() => { fetchSessions(); }, []);
 
   useEffect(() => {
     if (editingId && editRef.current) {
@@ -126,18 +45,6 @@ export default function SessionList() {
       editRef.current.select();
     }
   }, [editingId]);
-
-  // Handle browser back button when viewing a whiteboard inline
-  useEffect(() => {
-    if (!offlineSessionId) return;
-    const onPopState = () => {
-      if (!window.location.pathname.startsWith('/session/')) {
-        setOfflineSessionId(null);
-      }
-    };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, [offlineSessionId]);
 
   // Close menu on click outside
   useEffect(() => {
@@ -155,166 +62,48 @@ export default function SessionList() {
   const createSession = async () => {
     const sessionId = uuidv4();
     const pageId = uuidv4();
-    const now = new Date().toISOString();
 
-    // Always create in IDB first so it works offline
-    await putSession({
-      id: sessionId,
-      name: 'Untitled',
-      createdAt: now,
-      updatedAt: now,
-      thumbnail: null,
-    });
-    const newPage: Page = {
-      id: pageId,
-      sessionId,
-      position: 0,
-      backgroundPattern: 'blank',
-      backgroundColor: '#ffffff',
-      strokes: [],
-    };
-    await putPage(newPage, 0);
-
-    // Persist a pending action so the sync engine can replay it on reconnect
-    const actionId = uuidv4();
-    await putPendingAction({
-      actionId,
-      type: 'sessionCreate',
-      payload: JSON.stringify({ name: 'Untitled', id: sessionId, pageId }),
-      createdAt: Date.now(),
-      status: 'pending',
-    });
-
-    // Try to create on server immediately (non-blocking)
-    fetch('/api/sessions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Untitled', id: sessionId, pageId }),
-    }).then(async (res) => {
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Untitled', id: sessionId, pageId }),
+      });
       if (res.ok) {
-        await clearPendingAction(actionId);
+        router.push(`/session/${sessionId}`);
       }
-    }).catch(() => {});
-
-    if (isOffline) {
-      // Offline: render whiteboard inline instead of navigating — the SW can't
-      // serve an uncached /session/{id} page, so we stay in the SPA shell.
-      setOfflineSessionId(sessionId);
-      window.history.pushState(null, '', `/session/${sessionId}`);
-    } else {
-      router.push(`/session/${sessionId}`);
-    }
+    } catch { /* network error */ }
   };
 
   const deleteSession = async (id: string) => {
     setMenuId(null);
     setConfirmDeleteId(null);
 
-    // Remove from IDB immediately
-    const { deleteSession: deleteIDBSession } = await import('@/app/lib/idb');
-    await deleteIDBSession(id);
+    // Optimistic UI removal
     setSessions(prev => prev.filter(s => s.id !== id));
 
-    // Cancel any pending sessionCreate for this session (compaction)
-    const pending = await getPendingActions();
-    for (const action of pending) {
-      if (action.type === 'sessionCreate') {
-        try {
-          const payload = JSON.parse(action.payload);
-          if (payload.id === id) {
-            await clearPendingAction(action.actionId);
-          }
-        } catch { /* ignore */ }
+    try {
+      const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 404) {
+        // Restore on failure
+        fetchSessions();
       }
+    } catch {
+      fetchSessions();
     }
-
-    // Persist delete action and try server immediately
-    const deleteActionId = uuidv4();
-    await putPendingAction({
-      actionId: deleteActionId,
-      type: 'sessionDelete',
-      payload: JSON.stringify({ id }),
-      createdAt: Date.now(),
-      status: 'pending',
-    });
-
-    fetch(`/api/sessions/${id}`, { method: 'DELETE' })
-      .then(async (res) => {
-        if (res.ok || res.status === 404) {
-          await clearPendingAction(deleteActionId);
-        }
-      })
-      .catch(() => {});
   };
 
   const cloneSession = async (id: string) => {
     setMenuId(null);
 
     try {
-      if (!isOffline) {
-        const res = await fetch(`/api/sessions/${id}`, { method: 'POST' });
-        if (res.ok) {
-          const cloned = await res.json();
-          const listRes = await fetch('/api/sessions');
-          setSessions(await listRes.json());
-          router.push(`/session/${cloned.id}`);
-          return;
-        }
+      const res = await fetch(`/api/sessions/${id}`, { method: 'POST' });
+      if (res.ok) {
+        const cloned = await res.json();
+        await fetchSessions();
+        router.push(`/session/${cloned.id}`);
       }
-      throw new Error('offline or failed');
-    } catch {
-      // Offline clone — duplicate locally from IDB
-      const newSessionId = uuidv4();
-      const now = new Date().toISOString();
-
-      const sourceSession = await getSession(id);
-      if (!sourceSession) return;
-
-      await putSession({
-        id: newSessionId,
-        name: `${sourceSession.name} (copy)`,
-        createdAt: now,
-        updatedAt: now,
-        thumbnail: sourceSession.thumbnail,
-      });
-
-      const sourcePages = await getPagesBySession(id);
-      for (const sp of sourcePages) {
-        const newPageId = uuidv4();
-        const clonedPage: Page = {
-          id: newPageId,
-          sessionId: newSessionId,
-          position: sp.position,
-          backgroundPattern: sp.backgroundPattern,
-          backgroundColor: sp.backgroundColor,
-          strokes: sp.strokes.map(s => ({ ...s, id: uuidv4() })),
-        };
-        await putPage(clonedPage, Date.now());
-      }
-
-      // Queue pending action for server sync
-      await putPendingAction({
-        actionId: uuidv4(),
-        type: 'sessionCreate',
-        payload: JSON.stringify({ name: `${sourceSession.name} (copy)`, id: newSessionId, pageId: uuidv4() }),
-        createdAt: Date.now(),
-        status: 'pending',
-      });
-
-      // Try to sync immediately
-      fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: `${sourceSession.name} (copy)`, id: newSessionId }),
-      }).catch(() => {});
-
-      if (isOffline) {
-        setOfflineSessionId(newSessionId);
-        window.history.pushState(null, '', `/session/${newSessionId}`);
-      } else {
-        router.push(`/session/${newSessionId}`);
-      }
-    }
+    } catch { /* network error */ }
   };
 
   const startRename = (id: string, name: string) => {
@@ -327,47 +116,30 @@ export default function SessionList() {
     if (!editingId) return;
     const trimmed = editValue.trim();
     if (trimmed) {
-      // Update IDB immediately (works offline)
-      const session = await getSession(editingId);
-      if (session) {
-        await putSession({ ...session, name: trimmed, updatedAt: new Date().toISOString() });
-      }
-
-      // Update UI immediately
+      // Optimistic UI update
       setSessions(prev => prev.map(s => s.id === editingId ? { ...s, name: trimmed } : s));
 
-      // Queue pending action for sync
-      const actionId = uuidv4();
-      await putPendingAction({
-        actionId,
-        type: 'sessionRename',
-        payload: JSON.stringify({ id: editingId, name: trimmed }),
-        createdAt: Date.now(),
-        status: 'pending',
-      });
-
-      // Try server sync immediately (non-blocking)
-      fetch(`/api/sessions/${editingId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: trimmed }),
-      }).then(async (res) => {
-        if (res.ok) await clearPendingAction(actionId);
-      }).catch(() => {});
+      try {
+        const res = await fetch(`/api/sessions/${editingId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: trimmed }),
+        });
+        if (!res.ok) {
+          // Restore on failure
+          fetchSessions();
+        }
+      } catch {
+        fetchSessions();
+      }
     }
     setEditingId(null);
   };
 
   const openSession = (id: string) => {
     if (editingId || menuId) return;
-    if (isOffline) {
-      // Render whiteboard inline — no page navigation needed.
-      setOfflineSessionId(id);
-      window.history.pushState(null, '', `/session/${id}`);
-    } else {
-      setNavigatingId(id);
-      window.location.href = `/session/${id}`;
-    }
+    setNavigatingId(id);
+    window.location.href = `/session/${id}`;
   };
 
   const formatDate = (iso: string) => {
@@ -385,19 +157,6 @@ export default function SessionList() {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
-  // Offline: render whiteboard inline instead of navigating to a new page.
-  // The whiteboard will load its data from IndexedDB.
-  if (offlineSessionId) {
-    const sessionName = sessions.find(s => s.id === offlineSessionId)?.name || 'Untitled';
-    return (
-      <WhiteboardLoader
-        sessionId={offlineSessionId}
-        initialPages={[]}
-        sessionName={sessionName}
-      />
-    );
-  }
-
   return (
     <div
       className="min-h-screen text-neutral-200 overflow-auto touch-auto select-auto"
@@ -409,23 +168,7 @@ export default function SessionList() {
       <div className="max-w-5xl mx-auto px-6 pt-10 pb-10">
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-semibold text-white tracking-tight">Whiteboard</h1>
-            {isOffline && (
-              <span className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-600/20 text-amber-400 text-xs" title="Offline — viewing cached data">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="1" y1="1" x2="23" y2="23" />
-                  <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55" />
-                  <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39" />
-                  <path d="M10.71 5.05A16 16 0 0 1 22.56 9" />
-                  <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" />
-                  <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
-                  <line x1="12" y1="20" x2="12.01" y2="20" />
-                </svg>
-                Offline
-              </span>
-            )}
-          </div>
+          <h1 className="text-2xl font-semibold text-white tracking-tight">Whiteboard</h1>
           <button
             onClick={createSession}
             className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium cursor-pointer transition-colors hover:bg-blue-500 border-none flex items-center gap-2"

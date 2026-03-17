@@ -113,6 +113,11 @@ export async function getPagesBySession(sessionId: string): Promise<(Page & { lo
   return db.getAllFromIndex('pages', 'sessionId', sessionId);
 }
 
+export async function getPage(pageId: string): Promise<(Page & { localUpdatedAt: number }) | undefined> {
+  const db = await getDB();
+  return db.get('pages', pageId);
+}
+
 export async function putPage(page: Page, localUpdatedAt?: number) {
   const db = await getDB();
   return db.put('pages', { ...page, localUpdatedAt: localUpdatedAt ?? Date.now() });

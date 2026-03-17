@@ -133,68 +133,78 @@ export function useIDBState(
           return;
         }
 
-        // Background fetch from server
-        fetchStartedAtRef.current = Date.now();
-        try {
-          const res = await fetch(`/api/sessions/${sessionId}/data`);
-          if (cancelled) return;
-          if (!res.ok) {
-            if (res.status === 404 && initialPages.length === 0 && idbPages.length === 0) {
+        // Background fetch from server — only when we loaded from IDB
+        // (stale cache). Skip when SSR provided fresh data to avoid a
+        // race where the fetch overwrites user edits made before the
+        // response arrives (fire-and-forget IDB writes in setPage make
+        // the dirty-page check unreliable).
+        if (idbPages.length > 0) {
+          fetchStartedAtRef.current = Date.now();
+          try {
+            const res = await fetch(`/api/sessions/${sessionId}/data`);
+            if (cancelled) return;
+            if (!res.ok) return;
+            const serverData = await res.json();
+            const serverPages: ServerPageData[] = serverData.pages || [];
+
+            // Get current dirty pages
+            const dirtySet = new Set(
+              (await getDirtyPagesForSession(sessionId)).map((d) => d.pageId)
+            );
+
+            // Re-read fresh IDB state after fetch (user may have edited during fetch)
+            const freshIdbPages = await getPagesBySession(sessionId);
+
+            for (const sp of serverPages) {
+              const serverPage = serverPageToPage(sp);
+
+              // Skip if dirty locally
+              if (dirtySet.has(serverPage.id)) continue;
+
+              // Re-read fresh IDB page to avoid stale snapshot
+              const freshLocalPage = freshIdbPages.find((p) => p.id === serverPage.id);
+              if (freshLocalPage && freshLocalPage.localUpdatedAt > fetchStartedAtRef.current) {
+                continue;
+              }
+
+              // Compare hashes
+              const localPage = freshLocalPage
+                ? ({
+                    id: freshLocalPage.id,
+                    sessionId: freshLocalPage.sessionId,
+                    position: freshLocalPage.position,
+                    backgroundPattern: freshLocalPage.backgroundPattern,
+                    backgroundColor: freshLocalPage.backgroundColor,
+                    strokes: freshLocalPage.strokes,
+                  } as Page)
+                : null;
+
+              if (localPage) {
+                const [localHash, serverHash] = await Promise.all([
+                  computePageHashWithResolvedAssets(localPage),
+                  computePageHash(serverPage),
+                ]);
+                if (localHash === serverHash) continue;
+              }
+
+              // Server wins — update IDB and state
+              await putPage(serverPage, 0);
+              if (serverPage.position === 0) {
+                setPageState(serverPage);
+              }
+            }
+          } catch {
+            // Server unreachable — proceed with IDB data
+          }
+        } else if (initialPages.length === 0 && serverSessionExists !== false) {
+          // No IDB data and no SSR data — check if session exists on server
+          try {
+            const res = await fetch(`/api/sessions/${sessionId}/data`);
+            if (cancelled) return;
+            if (res.status === 404) {
               setNotFound(true);
             }
-            return;
-          }
-          const serverData = await res.json();
-          const serverPages: ServerPageData[] = serverData.pages || [];
-
-          // Get current dirty pages
-          const dirtySet = new Set(
-            (await getDirtyPagesForSession(sessionId)).map((d) => d.pageId)
-          );
-
-          // Re-read fresh IDB state after fetch (user may have edited during fetch)
-          const freshIdbPages = await getPagesBySession(sessionId);
-
-          for (const sp of serverPages) {
-            const serverPage = serverPageToPage(sp);
-
-            // Skip if dirty locally
-            if (dirtySet.has(serverPage.id)) continue;
-
-            // Re-read fresh IDB page to avoid stale snapshot
-            const freshLocalPage = freshIdbPages.find((p) => p.id === serverPage.id);
-            if (freshLocalPage && freshLocalPage.localUpdatedAt > fetchStartedAtRef.current) {
-              continue;
-            }
-
-            // Compare hashes
-            const localPage = freshLocalPage
-              ? ({
-                  id: freshLocalPage.id,
-                  sessionId: freshLocalPage.sessionId,
-                  position: freshLocalPage.position,
-                  backgroundPattern: freshLocalPage.backgroundPattern,
-                  backgroundColor: freshLocalPage.backgroundColor,
-                  strokes: freshLocalPage.strokes,
-                } as Page)
-              : null;
-
-            if (localPage) {
-              const [localHash, serverHash] = await Promise.all([
-                computePageHashWithResolvedAssets(localPage),
-                computePageHash(serverPage),
-              ]);
-              if (localHash === serverHash) continue;
-            }
-
-            // Server wins — update IDB and state
-            await putPage(serverPage, 0);
-            if (serverPage.position === 0) {
-              setPageState(serverPage);
-            }
-          }
-        } catch {
-          // Server unreachable — proceed with IDB/SSR data
+          } catch { /* offline */ }
         }
       } catch (err) {
         console.error('IDB init error:', err);

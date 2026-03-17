@@ -82,7 +82,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   useEffect(() => { strokesRef.current = strokes; }, [strokes]);
 
   const pageRef = useRef(page);
-  useEffect(() => { pageRef.current = page; }, [page]);
+  pageRef.current = page;
 
   // Generate and save thumbnail
   const thumbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

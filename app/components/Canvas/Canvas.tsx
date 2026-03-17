@@ -171,6 +171,17 @@ export default function Canvas({
     ctx.clearRect(0, 0, w, h);
   }, [getCtx, getViewportSize]);
 
+  const drawCommittedStrokeToInk = useCallback((stroke: Stroke) => {
+    const ctx = getCtx(inkCanvasRef.current);
+    if (!ctx) return;
+    const { panX, panY, scale: s } = getTransform();
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(s, s);
+    renderStroke(ctx, stroke, () => redrawInkRef.current?.());
+    ctx.restore();
+  }, [getCtx, getTransform]);
+
   const {
     selectedImageRef,
     dragHandleRef,
@@ -265,8 +276,8 @@ export default function Canvas({
     };
   }, [resizeCanvases, redrawBackground, redrawInk]);
 
-  useEffect(() => { scheduleRedraw(false, true); }, [strokes, scheduleRedraw]);
-  useEffect(() => { scheduleRedraw(true, false); }, [backgroundColor, backgroundPattern, scheduleRedraw]);
+  useEffect(() => { redrawInk(); }, [strokes, redrawInk]);
+  useEffect(() => { redrawBackground(); }, [backgroundColor, backgroundPattern, redrawBackground]);
   // Sync viewport ref when React state changes externally (e.g. zoom buttons)
   useEffect(() => {
     const changed = viewportRef.current.scale !== scale ||
@@ -275,8 +286,11 @@ export default function Canvas({
     viewportRef.current = { scale, panOffset };
     scaleRef.current = scale;
     panOffsetRef.current = panOffset;
-    if (changed) scheduleRedraw(true, true);
-  }, [scale, panOffset, scheduleRedraw]);
+    if (changed) {
+      redrawBackground();
+      redrawInk();
+    }
+  }, [scale, panOffset, redrawBackground, redrawInk]);
 
   // Track shift and space keys
   useEffect(() => {
@@ -921,6 +935,7 @@ export default function Canvas({
         const strokeType = tool === 'marker' ? 'marker' : 'freehand';
         const stroke: FreehandStroke | MarkerStroke = { type: strokeType, id: uuidv4(), points: [...currentPointsRef.current], style: { ...style } };
         onStrokeCompleteRef.current(stroke);
+        drawCommittedStrokeToInk(stroke);
         currentPointsRef.current = [];
         clearPreview();
       } else if (tool === 'line' || tool === 'rect' || tool === 'triangle' || tool === 'ellipse') {
@@ -945,6 +960,7 @@ export default function Canvas({
             stroke = { type: 'ellipse', id: uuidv4(), center: { x: cx, y: cy, pressure: start.pressure }, radiusX: Math.abs(end.x - start.x) / 2, radiusY: Math.abs(end.y - start.y) / 2, style: { ...style } };
           }
           onStrokeCompleteRef.current(stroke);
+          drawCommittedStrokeToInk(stroke);
         }
         startPointRef.current = null;
         currentPointRef.current = null;
@@ -968,7 +984,7 @@ export default function Canvas({
       canvas.removeEventListener('contextmenu', onContextMenu);
       cancelAnimationFrame(rafIdRef.current);
     };
-  }, [getPoint, getCtx, getViewportSize, getTransform, clearPreview, findStrokeAtPoint, findImageAtPoint, drawImageSelection, redrawBackground, redrawInk, updateViewport, flushViewportCommit]);
+  }, [getPoint, getCtx, getViewportSize, getTransform, clearPreview, drawCommittedStrokeToInk, findStrokeAtPoint, findImageAtPoint, drawImageSelection, redrawBackground, redrawInk, updateViewport, flushViewportCommit]);
 
 
   const eraserCursorSvg = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Ccircle cx='11' cy='11' r='9.5' fill='none' stroke='black' stroke-width='2'/%3E%3Ccircle cx='11' cy='11' r='9.5' fill='none' stroke='white' stroke-width='1'/%3E%3C/svg%3E") 11 11, auto`;
@@ -1041,4 +1057,3 @@ export default function Canvas({
     </div>
   );
 }
-

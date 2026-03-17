@@ -9,13 +9,14 @@ import {
   getAssetMapping,
   putAssetMapping,
   getAsset,
+  getPage,
   putPendingAction,
   clearPendingAction,
   getPendingActions,
   putAsset,
   putPage,
 } from '@/app/lib/idb';
-import { replaySessionActions } from '@/app/lib/replayPendingActions';
+
 
 const MAX_RETRIES = 8;
 const BASE_DELAY = 500;
@@ -149,16 +150,34 @@ export function useSyncEngine(sessionId: string) {
   const pageRevisionRef = useRef<Record<string, number>>({});
   const onConflictRef = useRef<((serverStrokes: Stroke[]) => void) | null>(null);
 
+  const loadLatestPage = useCallback(
+    async (page: Page): Promise<Page> => {
+      const latest = await getPage(page.id);
+      if (!latest) return page;
+      return {
+        id: latest.id,
+        sessionId: latest.sessionId,
+        position: latest.position,
+        backgroundPattern: latest.backgroundPattern,
+        backgroundColor: latest.backgroundColor,
+        strokes: latest.strokes,
+      };
+    },
+    []
+  );
+
   const doPageSync = useCallback(
     async (page: Page) => {
       if (!navigator.onLine) return;
 
+      const latestPage = await loadLatestPage(page);
+
       // Upload pending assets for this page
-      const assetsOk = await uploadPendingAssetsForPage(page.strokes, sessionId);
+      const assetsOk = await uploadPendingAssetsForPage(latestPage.strokes, sessionId);
       if (!assetsOk) return;
 
       // Resolve local IDs to remote IDs for server
-      const resolvedStrokes = await resolveStrokesForServer(page.strokes);
+      const resolvedStrokes = await resolveStrokesForServer(latestPage.strokes);
 
       // Abort if any unresolved local- IDs remain — don't send them to the server
       const hasUnresolved = resolvedStrokes.some(
@@ -183,11 +202,11 @@ export function useSyncEngine(sessionId: string) {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            pageId: page.id,
+            pageId: latestPage.id,
             sessionId,
             strokes: resolvedStrokes,
             actionId,
-            expectedRevision: pageRevisionRef.current[page.id],
+            expectedRevision: pageRevisionRef.current[latestPage.id],
           }),
         });
         if (res.status === 409) {
@@ -195,10 +214,10 @@ export function useSyncEngine(sessionId: string) {
           if (body.conflict && body.strokes) {
             // Server has newer data — hydrate locally
             console.warn('Page sync conflict — accepting server version, revision:', body.revision);
-            pageRevisionRef.current[page.id] = body.revision;
-            const serverPage: Page = { ...page, strokes: body.strokes };
+            pageRevisionRef.current[latestPage.id] = body.revision;
+            const serverPage: Page = { ...latestPage, strokes: body.strokes };
             await putPage(serverPage, 0); // localUpdatedAt=0 so server wins next comparison
-            await clearDirty(page.id);
+            await clearDirty(latestPage.id);
             onConflictRef.current?.(body.strokes);
           }
           await clearPendingAction(actionId);
@@ -210,26 +229,28 @@ export function useSyncEngine(sessionId: string) {
         }
         const result = await res.json();
         if (result.revision !== undefined) {
-          pageRevisionRef.current[page.id] = result.revision;
+          pageRevisionRef.current[latestPage.id] = result.revision;
         }
-        await clearDirty(page.id);
+        await clearDirty(latestPage.id);
         await clearPendingAction(actionId);
       } catch (e) {
         console.error('Page sync failed:', e);
       }
     },
-    [sessionId]
+    [loadLatestPage, sessionId]
   );
 
   const doBgSync = useCallback(
     async (page: Page) => {
       if (!navigator.onLine) return;
 
+      const latestPage = await loadLatestPage(page);
+
       const actionId = uuidv4();
       await putPendingAction({
         actionId,
         type: 'backgroundSync',
-        payload: JSON.stringify({ pageId: page.id }),
+        payload: JSON.stringify({ pageId: latestPage.id }),
         createdAt: Date.now(),
         status: 'inflight',
       });
@@ -239,9 +260,9 @@ export function useSyncEngine(sessionId: string) {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            pageId: page.id,
-            backgroundPattern: page.backgroundPattern,
-            backgroundColor: page.backgroundColor,
+            pageId: latestPage.id,
+            backgroundPattern: latestPage.backgroundPattern,
+            backgroundColor: latestPage.backgroundColor,
             actionId,
           }),
         });
@@ -251,14 +272,14 @@ export function useSyncEngine(sessionId: string) {
         }
         const result = await res.json();
         if (result.revision !== undefined) {
-          pageRevisionRef.current[page.id] = result.revision;
+          pageRevisionRef.current[latestPage.id] = result.revision;
         }
         await clearPendingAction(actionId);
       } catch (e) {
         console.error('Background sync failed:', e);
       }
     },
-    []
+    [loadLatestPage]
   );
 
   const flushAll = useCallback(async () => {
@@ -289,8 +310,6 @@ export function useSyncEngine(sessionId: string) {
         await doBgSync(bgPending);
       }
 
-      // Retry any crashed pending actions
-      await replaySessionActions();
     } finally {
       syncingRef.current = false;
       setIsSyncing(false);
