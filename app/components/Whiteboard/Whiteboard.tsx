@@ -592,23 +592,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
   return (
     <>
-      {/* Offline indicator — full-height right edge strip */}
-      {(isOffline || !isOnline) && (
-        <div className="fixed right-0 top-0 bottom-0 z-[90] w-8 flex items-center justify-center bg-amber-600/20 border-l border-amber-600/30 text-amber-400 backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-2" style={{ writingMode: 'vertical-rl' }}>
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-              <line x1="1" y1="1" x2="23" y2="23" />
-              <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55" />
-              <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39" />
-              <path d="M10.71 5.05A16 16 0 0 1 22.56 9" />
-              <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" />
-              <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
-              <line x1="12" y1="20" x2="12.01" y2="20" />
-            </svg>
-            <span className="text-[10px] tracking-wider uppercase">Offline</span>
-          </div>
-        </div>
-      )}
       {isSyncing && isOnline && (
         <div className="fixed top-3 right-3 z-[90] px-2 py-1 rounded bg-blue-600/80 text-white text-[10px] backdrop-blur-sm">
           Syncing...
@@ -665,6 +648,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         strokes={strokes}
         backgroundPattern={page.backgroundPattern}
         backgroundColor={page.backgroundColor}
+        isOffline={isOffline || !isOnline}
       />
       {pdfPageDialog && (
         <PdfPageDialog

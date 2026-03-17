@@ -1,4 +1,4 @@
-const CACHE_NAME = 'whiteboard-v1';
+const CACHE_NAME = 'whiteboard-v2';
 
 const PRECACHE_URLS = [
   '/',
@@ -47,9 +47,25 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Static assets (JS, CSS, images, fonts): cache-first
+  // Static assets: network-first for JS/CSS (so code updates are picked up),
+  // cache-first for immutable assets (images, fonts)
+  if (url.pathname.match(/\.(js|css|mjs)$/)) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
   if (
-    url.pathname.match(/\.(js|css|png|jpg|jpeg|gif|webp|svg|ico|woff|woff2|ttf|eot|mjs)$/)
+    url.pathname.match(/\.(png|jpg|jpeg|gif|webp|svg|ico|woff|woff2|ttf|eot)$/)
   ) {
     event.respondWith(
       caches.match(event.request).then((cached) => {
