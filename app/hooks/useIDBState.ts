@@ -82,26 +82,30 @@ function serverPageToPage(sp: ServerPageData): Page {
 export function useIDBState(
   sessionId: string,
   initialPages: Page[],
-  sessionName: string
+  sessionName: string,
+  serverSessionExists?: boolean
 ) {
   const [page, setPageState] = useState<Page | null>(initialPages[0] ?? null);
+  const [notFound, setNotFound] = useState(
+    serverSessionExists === false && initialPages.length === 0
+  );
   const isOffline = !useOnlineStatus();
-  const idbInitialized = useRef(false);
   const fetchStartedAtRef = useRef<number>(0);
-
   // On mount: load from IDB, background-fetch from server
   useEffect(() => {
-    if (idbInitialized.current) return;
-    idbInitialized.current = true;
+    let cancelled = false;
 
     (async () => {
       try {
         const idbPages = await getPagesBySession(sessionId);
 
+        if (cancelled) return;
+
         if (idbPages.length > 0) {
           // Sort by position
           idbPages.sort((a, b) => a.position - b.position);
           const first = idbPages[0];
+          setNotFound(false);
           setPageState({
             id: first.id,
             sessionId: first.sessionId,
@@ -110,7 +114,7 @@ export function useIDBState(
             backgroundColor: first.backgroundColor,
             strokes: first.strokes,
           });
-        } else {
+        } else if (initialPages.length > 0) {
           // No IDB data — populate from SSR
           for (const p of initialPages) {
             await putPage(p, 0);
@@ -122,13 +126,24 @@ export function useIDBState(
             updatedAt: new Date().toISOString(),
             thumbnail: null,
           });
+        } else if (serverSessionExists === false) {
+          // No IDB data and server confirmed session doesn't exist
+          if (cancelled) return;
+          setNotFound(true);
+          return;
         }
 
         // Background fetch from server
         fetchStartedAtRef.current = Date.now();
         try {
           const res = await fetch(`/api/sessions/${sessionId}/data`);
-          if (!res.ok) return;
+          if (cancelled) return;
+          if (!res.ok) {
+            if (res.status === 404 && initialPages.length === 0 && idbPages.length === 0) {
+              setNotFound(true);
+            }
+            return;
+          }
           const serverData = await res.json();
           const serverPages: ServerPageData[] = serverData.pages || [];
 
@@ -174,7 +189,7 @@ export function useIDBState(
 
             // Server wins — update IDB and state
             await putPage(serverPage, 0);
-            if (serverPage.id === page?.id || serverPage.position === 0) {
+            if (serverPage.position === 0) {
               setPageState(serverPage);
             }
           }
@@ -185,6 +200,10 @@ export function useIDBState(
         console.error('IDB init error:', err);
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -204,5 +223,5 @@ export function useIDBState(
     [sessionId]
   );
 
-  return { page, setPage, isOffline };
+  return { page, setPage, isOffline, notFound };
 }

@@ -101,7 +101,8 @@ export type Command =
   | { type: 'pasteImage'; pageId: string; stroke: ImageStroke }
   | { type: 'transformImageStroke'; pageId: string; strokeId: string; oldStroke: ImageStroke; newStroke: ImageStroke }
   | { type: 'pasteSnippet'; pageId: string; strokes: Stroke[] }
-  | { type: 'deleteSelected'; pageId: string; strokes: Stroke[] };
+  | { type: 'deleteSelected'; pageId: string; strokes: Stroke[] }
+  | { type: 'eraseStrokes'; pageId: string; erased: { strokeId: string; original: Stroke; remaining: Stroke[] }[] };
 
 export interface DirtyPage {
   pageId: string;

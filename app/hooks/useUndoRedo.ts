@@ -85,6 +85,24 @@ export function useUndoRedo({
         case 'deleteSelected':
           updatePageStrokes(cmd.pageId, s => [...s, ...cmd.strokes]);
           break;
+        case 'eraseStrokes':
+          // Undo: remove remaining fragments, restore originals
+          updatePageStrokes(cmd.pageId, s => {
+            let result = [...s];
+            for (const { strokeId, original, remaining } of cmd.erased) {
+              // Remove remaining fragments
+              const fragIds = new Set(remaining.map(r => r.id));
+              result = result.filter(st => !fragIds.has(st.id));
+              // Find where the original was (approximate: insert at the position of first fragment, or end)
+              // We'll just append since exact position isn't critical
+            }
+            // Re-add originals
+            for (const { original } of cmd.erased) {
+              result.push(original);
+            }
+            return result;
+          });
+          break;
       }
 
       setRedoStack(r => [...r, cmd]);
@@ -128,6 +146,23 @@ export function useUndoRedo({
           updatePageStrokes(cmd.pageId, s => s.filter(st => !ids.has(st.id)));
           break;
         }
+        case 'eraseStrokes':
+          // Redo: remove originals, insert remaining fragments
+          updatePageStrokes(cmd.pageId, s => {
+            let result = [...s];
+            for (const { strokeId, remaining } of cmd.erased) {
+              const idx = result.findIndex(st => st.id === strokeId);
+              if (idx !== -1) {
+                result.splice(idx, 1, ...remaining);
+              } else {
+                // Original not found at expected id, remove it anyway
+                result = result.filter(st => st.id !== strokeId);
+                result.push(...remaining);
+              }
+            }
+            return result;
+          });
+          break;
       }
 
       setUndoStack(u => [...u, cmd]);

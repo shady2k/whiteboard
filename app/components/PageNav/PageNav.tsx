@@ -71,13 +71,13 @@ export default function PageNav({
 
   return (
     <div className="fixed bottom-2 right-2 z-50 bg-neutral-900/85 backdrop-blur-md rounded-xl px-3 py-1.5 flex items-center gap-2 shadow-xl">
-      <Link
+      <a
         href="/"
         className="text-neutral-400 no-underline text-base px-2 py-1 rounded-md transition-colors hover:bg-white/10 hover:text-white"
         title="Back to sessions"
       >
         &#x2190;
-      </Link>
+      </a>
       <span
         className="text-neutral-500 text-sm max-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap select-none"
         title={sessionName}

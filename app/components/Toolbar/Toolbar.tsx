@@ -73,9 +73,11 @@ export default function Toolbar({
 }: ToolbarProps) {
   const [shapesOpen, setShapesOpen] = useState(false);
   const [colorsOpen, setColorsOpen] = useState(false);
+  const [widthsOpen, setWidthsOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const shapesRef = useRef<HTMLDivElement>(null);
   const colorsRef = useRef<HTMLDivElement>(null);
+  const widthsRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
 
   const activeShape = SHAPE_TOOLS.includes(activeTool) ? activeTool : 'line';
@@ -86,6 +88,7 @@ export default function Toolbar({
     const handler = (e: PointerEvent) => {
       if (shapesRef.current && !shapesRef.current.contains(e.target as Node)) setShapesOpen(false);
       if (colorsRef.current && !colorsRef.current.contains(e.target as Node)) setColorsOpen(false);
+      if (widthsRef.current && !widthsRef.current.contains(e.target as Node)) setWidthsOpen(false);
       if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false);
     };
     document.addEventListener('pointerdown', handler);
@@ -100,17 +103,18 @@ export default function Toolbar({
       queueMicrotask(() => {
         setShapesOpen(true);
         setColorsOpen(false);
+        setWidthsOpen(false);
         setMoreOpen(false);
       });
     }
   }, [activeTool]);
 
-  const closeAllMenus = () => { setShapesOpen(false); setColorsOpen(false); setMoreOpen(false); };
+  const closeAllMenus = () => { setShapesOpen(false); setColorsOpen(false); setWidthsOpen(false); setMoreOpen(false); };
 
   return (
     <>
     {/* Invisible backdrop to catch clicks when menus are open — prevents canvas from drawing */}
-    {(shapesOpen || colorsOpen || moreOpen) && (
+    {(shapesOpen || colorsOpen || widthsOpen || moreOpen) && (
       <div
         className="fixed inset-0 z-40"
         onPointerDown={(e) => {
@@ -154,7 +158,7 @@ export default function Toolbar({
           active={isShapeActive}
           onClick={() => {
             if (!isShapeActive) { onToolChange(activeShape); }
-            else { setShapesOpen(!shapesOpen); setColorsOpen(false); setMoreOpen(false); }
+            else { setShapesOpen(!shapesOpen); setColorsOpen(false); setWidthsOpen(false); setMoreOpen(false); }
           }}
           title={shapeLabel(activeShape)}
           badge="&#x25B8;"
@@ -187,7 +191,7 @@ export default function Toolbar({
             <div className="relative" ref={colorsRef}>
               <button
                 className="w-10 h-10 rounded-lg flex items-center justify-center cursor-pointer transition-colors border-none relative bg-transparent hover:bg-white/10"
-                onClick={() => { setColorsOpen(!colorsOpen); setShapesOpen(false); setMoreOpen(false); }}
+                onClick={() => { setColorsOpen(!colorsOpen); setShapesOpen(false); setWidthsOpen(false); setMoreOpen(false); }}
                 title="Color"
               >
                 <span
@@ -217,19 +221,34 @@ export default function Toolbar({
               )}
             </div>
 
-            {/* Widths — visual dots scaled to 3-12px range */}
-            <div className="flex flex-col items-center gap-1">
-              {widths.map((w, i) => {
-                const dotSize = 3 + (i / (widths.length - 1)) * 9;
-                return (
-                  <button key={w}
-                    className={`w-10 h-8 rounded-md flex items-center justify-center cursor-pointer transition-colors border-none
-                      ${currentStyle.baseWidth === w ? 'bg-blue-500/30' : 'bg-transparent hover:bg-white/10'}`}
-                    onClick={() => onWidthChange(w)} title={`${w}px`}>
-                    <span className="block rounded-full bg-neutral-400" style={{ width: dotSize, height: dotSize }} />
-                  </button>
-                );
-              })}
+            {/* Width (grouped with flyout) */}
+            <div className="relative" ref={widthsRef}>
+              <button
+                className="w-10 h-10 rounded-lg flex items-center justify-center cursor-pointer transition-colors border-none relative bg-transparent hover:bg-white/10"
+                onClick={() => { setWidthsOpen(!widthsOpen); setShapesOpen(false); setColorsOpen(false); setMoreOpen(false); }}
+                title={`Stroke width (${currentStyle.baseWidth}px)`}
+              >
+                <span className="block rounded-full bg-neutral-400" style={{
+                  width: 3 + (widths.indexOf(currentStyle.baseWidth) / (widths.length - 1)) * 9,
+                  height: 3 + (widths.indexOf(currentStyle.baseWidth) / (widths.length - 1)) * 9,
+                }} />
+                <span className="absolute right-0.5 bottom-0.5 text-[8px] text-neutral-500" dangerouslySetInnerHTML={{ __html: '&#x25B8;' }} />
+              </button>
+              {widthsOpen && (
+                <div className="absolute left-12 top-0 bg-neutral-900/95 backdrop-blur-md rounded-lg p-1 flex flex-col gap-1 shadow-xl border border-neutral-700/50 animate-menu-in">
+                  {widths.map((w, i) => {
+                    const dotSize = 3 + (i / (widths.length - 1)) * 9;
+                    return (
+                      <button key={w}
+                        className={`w-10 h-8 rounded-md flex items-center justify-center cursor-pointer transition-colors border-none
+                          ${currentStyle.baseWidth === w ? 'bg-blue-500/30' : 'bg-transparent hover:bg-white/10'}`}
+                        onClick={() => { onWidthChange(w); setWidthsOpen(false); }} title={`${w}px`}>
+                        <span className="block rounded-full bg-neutral-400" style={{ width: dotSize, height: dotSize }} />
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </>
         );
@@ -259,7 +278,7 @@ export default function Toolbar({
 
       {/* === MORE MENU === */}
       <div className="relative" ref={moreRef}>
-        <ToolBtn active={false} onClick={() => { setMoreOpen(!moreOpen); setShapesOpen(false); setColorsOpen(false); }} title="More options">
+        <ToolBtn active={false} onClick={() => { setMoreOpen(!moreOpen); setShapesOpen(false); setColorsOpen(false); setWidthsOpen(false); }} title="More options">
           <MoreIcon />
         </ToolBtn>
         {moreOpen && (

@@ -7,14 +7,16 @@ interface WhiteboardLoaderProps {
   sessionId: string;
   initialPages: Page[];
   sessionName: string;
+  serverSessionExists?: boolean;
 }
 
-export default function WhiteboardLoader({ sessionId, initialPages, sessionName }: WhiteboardLoaderProps) {
+export default function WhiteboardLoader({ sessionId, initialPages, sessionName, serverSessionExists }: WhiteboardLoaderProps) {
   return (
     <Whiteboard
       sessionId={sessionId}
       initialPages={initialPages}
       sessionName={sessionName}
+      serverSessionExists={serverSessionExists}
     />
   );
 }

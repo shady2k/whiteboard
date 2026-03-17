@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo, startTransition } from 'react';
 import { Stroke, ToolType, StrokeStyle, Page, BackgroundPattern, ImageStroke, Snippet } from '@/app/types';
 import Canvas from '@/app/components/Canvas/Canvas';
 import Toolbar from '@/app/components/Toolbar/Toolbar';
@@ -22,12 +22,13 @@ interface WhiteboardProps {
   sessionId: string;
   initialPages: Page[];
   sessionName: string;
+  serverSessionExists?: boolean;
 }
 
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
 
-export default function Whiteboard({ sessionId, initialPages, sessionName: initialName }: WhiteboardProps) {
-  const { page, setPage, isOffline } = useIDBState(sessionId, initialPages, initialName);
+export default function Whiteboard({ sessionId, initialPages, sessionName: initialName, serverSessionExists }: WhiteboardProps) {
+  const { page, setPage, isOffline, notFound } = useIDBState(sessionId, initialPages, initialName, serverSessionExists);
   const { queuePageSync, queueBackgroundSync, tryThumbnailSync, isOnline, isSyncing, setOnConflict, setPageRevision } = useSyncEngine(sessionId);
 
   // Wire up conflict handler — server wins, update React state
@@ -47,9 +48,26 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     color: '#facc15',
     baseWidth: 24,
   });
-  const [zoom, setZoom] = useState(1);
-  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(() => {
+    if (typeof sessionStorage === 'undefined') return 1;
+    const saved = sessionStorage.getItem(`wb-zoom-${sessionId}`);
+    return saved ? Number(saved) : 1;
+  });
+  const [panOffset, setPanOffset] = useState(() => {
+    if (typeof sessionStorage === 'undefined') return { x: 0, y: 0 };
+    const saved = sessionStorage.getItem(`wb-pan-${sessionId}`);
+    if (!saved) return { x: 0, y: 0 };
+    try { return JSON.parse(saved); } catch { return { x: 0, y: 0 }; }
+  });
   const [showCheatsheet, setShowCheatsheet] = useState(false);
+
+  // Persist viewport to sessionStorage so it survives navigation
+  useEffect(() => {
+    sessionStorage.setItem(`wb-zoom-${sessionId}`, String(zoom));
+  }, [sessionId, zoom]);
+  useEffect(() => {
+    sessionStorage.setItem(`wb-pan-${sessionId}`, JSON.stringify(panOffset));
+  }, [sessionId, panOffset]);
 
   // Snippet state
   const { snippets, saveSnippet, deleteSnippet } = useSnippetSync();
@@ -155,6 +173,30 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     pushCommand({ type: 'deleteStroke', pageId, strokeId, stroke });
     setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
   }, [page?.id, strokes, updatePageStrokes, pushCommand, queuePageSync]);
+
+  const handleEraseCommit = useCallback((erased: { strokeId: string; remaining: Stroke[] }[]) => {
+    const pageId = page?.id;
+    if (!pageId) return;
+    // Build undo data: capture original strokes before replacing
+    const undoData = erased.map(({ strokeId, remaining }) => {
+      const original = strokes.find(s => s.id === strokeId);
+      return { strokeId, original: original!, remaining };
+    }).filter(e => e.original);
+    setPage(prev => {
+      let newStrokes = [...prev.strokes];
+      for (const { strokeId, remaining } of erased) {
+        const idx = newStrokes.findIndex(s => s.id === strokeId);
+        if (idx === -1) continue;
+        // Replace the original stroke with its remaining fragments
+        newStrokes.splice(idx, 1, ...remaining);
+      }
+      return { ...prev, strokes: newStrokes };
+    });
+    if (undoData.length > 0) {
+      pushCommand({ type: 'eraseStrokes', pageId, erased: undoData });
+    }
+    setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
+  }, [page?.id, strokes, setPage, pushCommand, queuePageSync]);
 
   const handleBackgroundPatternChange = useCallback(async (pattern: BackgroundPattern) => {
     const pageId = page?.id;
@@ -422,6 +464,26 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   useEffect(() => { clipboardRef.current = clipboard; }, [clipboard]);
   useEffect(() => { pendingSelectionRef.current = pendingSelection; }, [pendingSelection]);
 
+  const handleZoomChange = useCallback((z: number) => startTransition(() => setZoom(z)), []);
+  const handlePanChange = useCallback((p: { x: number; y: number }) => startTransition(() => setPanOffset(p)), []);
+
+  if (notFound) {
+    return (
+      <div className="fixed inset-0 flex items-center justify-center" style={{ background: '#16161a' }}>
+        <div className="text-neutral-400 text-sm flex flex-col items-center gap-4">
+          <div className="text-lg font-medium text-neutral-300">Session not found</div>
+          <p className="text-neutral-500">This whiteboard session doesn&apos;t exist or has been deleted.</p>
+          <a
+            href="/"
+            className="mt-2 px-4 py-2 rounded-lg bg-neutral-700 hover:bg-neutral-600 text-neutral-200 transition-colors"
+          >
+            Go to Home
+          </a>
+        </div>
+      </div>
+    );
+  }
+
   if (!page) {
     return (
       <div className="fixed inset-0 flex items-center justify-center" style={{ background: '#16161a' }}>
@@ -435,11 +497,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
   return (
     <>
-      {isSyncing && isOnline && (
-        <div className="fixed top-3 right-3 z-[90] px-2 py-1 rounded bg-blue-600/80 text-white text-[10px] backdrop-blur-sm">
-          Syncing...
-        </div>
-      )}
       <Canvas
         strokes={strokes}
         activeTool={activeTool}
@@ -450,10 +507,11 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         panOffset={panOffset}
         onStrokeComplete={handleStrokeComplete}
         onStrokeDelete={handleStrokeDelete}
+        onEraseCommit={handleEraseCommit}
         onImageTransform={handleImageTransform}
         onToolChange={setActiveTool}
-        onZoomChange={setZoom}
-        onPanChange={setPanOffset}
+        onZoomChange={handleZoomChange}
+        onPanChange={handlePanChange}
         onSelectionComplete={handleSelectionComplete}
         pastePreview={pasteSnippet}
         onPasteConfirm={handlePasteConfirm}

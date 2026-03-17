@@ -366,7 +366,7 @@ export default function SessionList() {
       window.history.pushState(null, '', `/session/${id}`);
     } else {
       setNavigatingId(id);
-      router.push(`/session/${id}`);
+      window.location.href = `/session/${id}`;
     }
   };
 

@@ -9,7 +9,7 @@ import { drawLinePreview, drawRectPreview, drawEllipsePreview, drawTrianglePrevi
 import { drawBackground } from '@/app/utils/drawGrid';
 import { snapLineEnd, snapRectEnd, snapEllipseEnd } from '@/app/utils/snapShape';
 import { getCachedImage } from '@/app/utils/imageCache';
-import { strokeIntersectsRect, findStrokeAtPoint as findStrokeAtPointUtil } from '@/app/utils/strokeBounds';
+import { strokeIntersectsRect, findStrokeAtPoint as findStrokeAtPointUtil, partialEraseStroke, distPointToSegment } from '@/app/utils/strokeBounds';
 import { offsetStroke } from '@/app/utils/strokeTransform';
 import { useImageDrag } from '@/app/hooks/useImageDrag';
 import { v4 as uuidv4 } from 'uuid';
@@ -24,6 +24,7 @@ interface CanvasProps {
   panOffset: { x: number; y: number };
   onStrokeComplete: (stroke: Stroke) => void;
   onStrokeDelete?: (strokeId: string) => void;
+  onEraseCommit?: (erased: { strokeId: string; remaining: Stroke[] }[]) => void;
   onImageTransform?: (strokeId: string, newStroke: ImageStroke) => void;
   onToolChange?: (tool: ToolType) => void;
   onZoomChange?: (zoom: number) => void;
@@ -44,6 +45,7 @@ export default function Canvas({
   panOffset,
   onStrokeComplete,
   onStrokeDelete,
+  onEraseCommit,
   onImageTransform,
   onToolChange,
   onZoomChange,
@@ -70,6 +72,10 @@ export default function Canvas({
   const panOffsetStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const spaceHeldRef = useRef(false);
 
+  // Mutable viewport state — drives canvas directly, syncs back to React lazily
+  const viewportRef = useRef({ scale, panOffset });
+  const viewportCommitRafRef = useRef(0);
+
   const activeToolRef = useLatestRef(activeTool);
   const strokeStyleRef = useLatestRef(strokeStyle);
   const strokesRef = useLatestRef(strokes);
@@ -78,6 +84,9 @@ export default function Canvas({
   const scaleRef = useLatestRef(scale);
   const onStrokeCompleteRef = useLatestRef(onStrokeComplete);
   const onStrokeDeleteRef = useLatestRef(onStrokeDelete);
+  const onEraseCommitRef = useLatestRef(onEraseCommit);
+  // Track eraser path during a drag — collect all eraser positions, commit on mouseup
+  const eraserPointsRef = useRef<Point[]>([]);
   const onImageTransformRef = useLatestRef(onImageTransform);
   const onToolChangeRef = useLatestRef(onToolChange);
   const onZoomChangeRef = useLatestRef(onZoomChange);
@@ -98,9 +107,9 @@ export default function Canvas({
   // Compute pan offset for center-based zoom + user pan
   const getTransform = useCallback(() => {
     const { w, h } = getViewportSize();
-    const s = scaleRef.current;
-    const panX = (w / 2) * (1 - s) + panOffsetRef.current.x;
-    const panY = (h / 2) * (1 - s) + panOffsetRef.current.y;
+    const { scale: s, panOffset: pan } = viewportRef.current;
+    const panX = (w / 2) * (1 - s) + pan.x;
+    const panY = (h / 2) * (1 - s) + pan.y;
     return { panX, panY, scale: s };
   }, [getViewportSize]);
 
@@ -131,13 +140,12 @@ export default function Canvas({
     ctx.save();
     ctx.translate(panX, panY);
     ctx.scale(s, s);
-    // Draw background large enough to cover visible area
-    const visW = w / s + Math.abs(panX) / s * 2;
-    const visH = h / s + Math.abs(panY) / s * 2;
-    const offsetX = panX < 0 ? -panX / s : 0;
-    const offsetY = panY < 0 ? -panY / s : 0;
-    ctx.translate(-offsetX, -offsetY);
-    drawBackground(ctx, visW, visH, bgPatternRef.current, bgColorRef.current);
+    // Visible rectangle in canvas coordinates
+    const visX = -panX / s;
+    const visY = -panY / s;
+    const visW = w / s;
+    const visH = h / s;
+    drawBackground(ctx, visW, visH, bgPatternRef.current, bgColorRef.current, visX, visY);
     ctx.restore();
   }, [getCtx, getViewportSize, getTransform]);
 
@@ -196,6 +204,47 @@ export default function Canvas({
     previewCanvasRef,
   });
 
+  // rAF-batched redraw scheduling
+  const rafRef = useRef(0);
+  const dirtyRef = useRef<{ bg: boolean; ink: boolean }>({ bg: false, ink: false });
+
+  const scheduleRedraw = useCallback((bg: boolean, ink: boolean) => {
+    if (bg) dirtyRef.current.bg = true;
+    if (ink) dirtyRef.current.ink = true;
+    if (rafRef.current) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      const { bg: needBg, ink: needInk } = dirtyRef.current;
+      dirtyRef.current = { bg: false, ink: false };
+      if (needBg) redrawBackground();
+      if (needInk) redrawInk();
+    });
+  }, [redrawBackground, redrawInk]);
+
+  // Direct viewport update — bypasses React render, draws immediately via rAF
+  const updateViewport = useCallback((nextScale: number, nextPan: { x: number; y: number }) => {
+    viewportRef.current = { scale: nextScale, panOffset: nextPan };
+    scaleRef.current = nextScale;
+    panOffsetRef.current = nextPan;
+    scheduleRedraw(true, true);
+
+    // Lazily sync back to React state
+    if (viewportCommitRafRef.current) cancelAnimationFrame(viewportCommitRafRef.current);
+    viewportCommitRafRef.current = requestAnimationFrame(() => {
+      viewportCommitRafRef.current = 0;
+      if (onPanChangeRef.current) onPanChangeRef.current(viewportRef.current.panOffset);
+      if (onZoomChangeRef.current) onZoomChangeRef.current(viewportRef.current.scale);
+    });
+  }, [scheduleRedraw]);
+
+  const flushViewportCommit = useCallback(() => {
+    if (!viewportCommitRafRef.current) return;
+    cancelAnimationFrame(viewportCommitRafRef.current);
+    viewportCommitRafRef.current = 0;
+    if (onPanChangeRef.current) onPanChangeRef.current(viewportRef.current.panOffset);
+    if (onZoomChangeRef.current) onZoomChangeRef.current(viewportRef.current.scale);
+  }, []);
+
   // Init + resize
   useEffect(() => {
     resizeCanvases();
@@ -209,13 +258,25 @@ export default function Canvas({
     };
 
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (viewportCommitRafRef.current) cancelAnimationFrame(viewportCommitRafRef.current);
+    };
   }, [resizeCanvases, redrawBackground, redrawInk]);
 
-  useEffect(() => { redrawInk(); }, [strokes, redrawInk]);
-  useEffect(() => { redrawBackground(); }, [backgroundColor, backgroundPattern, redrawBackground]);
-  useEffect(() => { redrawBackground(); redrawInk(); }, [scale, redrawBackground, redrawInk]);
-  useEffect(() => { redrawBackground(); redrawInk(); }, [panOffset, redrawBackground, redrawInk]);
+  useEffect(() => { scheduleRedraw(false, true); }, [strokes, scheduleRedraw]);
+  useEffect(() => { scheduleRedraw(true, false); }, [backgroundColor, backgroundPattern, scheduleRedraw]);
+  // Sync viewport ref when React state changes externally (e.g. zoom buttons)
+  useEffect(() => {
+    const changed = viewportRef.current.scale !== scale ||
+      viewportRef.current.panOffset.x !== panOffset.x ||
+      viewportRef.current.panOffset.y !== panOffset.y;
+    viewportRef.current = { scale, panOffset };
+    scaleRef.current = scale;
+    panOffsetRef.current = panOffset;
+    if (changed) scheduleRedraw(true, true);
+  }, [scale, panOffset, scheduleRedraw]);
 
   // Track shift and space keys
   useEffect(() => {
@@ -235,22 +296,22 @@ export default function Canvas({
   // Pinch-to-zoom (trackpad/gesture) and Ctrl+wheel; plain scroll = pan
   useEffect(() => {
     const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const vp = viewportRef.current;
       if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
         const delta = -e.deltaY * 0.01;
-        const newZoom = Math.max(0.25, Math.min(4, scaleRef.current + delta));
-        if (onZoomChangeRef.current) onZoomChangeRef.current(newZoom);
+        const newZoom = Math.max(0.25, Math.min(4, vp.scale + delta));
+        updateViewport(newZoom, vp.panOffset);
       } else {
-        e.preventDefault();
-        const cur = panOffsetRef.current;
-        if (onPanChangeRef.current) {
-          onPanChangeRef.current({ x: cur.x - e.deltaX, y: cur.y - e.deltaY });
-        }
+        updateViewport(vp.scale, {
+          x: vp.panOffset.x - e.deltaX,
+          y: vp.panOffset.y - e.deltaY,
+        });
       }
     };
     document.addEventListener('wheel', handleWheel, { passive: false });
     return () => document.removeEventListener('wheel', handleWheel);
-  }, []);
+  }, [updateViewport]);
 
   // Clear preview when selection is dismissed
   useEffect(() => {
@@ -395,8 +456,7 @@ export default function Canvas({
       if (tool === 'pen' || tool === 'marker') {
         currentPointsRef.current = [point];
       } else if (tool === 'eraser') {
-        const strokeId = findStrokeAtPoint(point);
-        if (strokeId && onStrokeDeleteRef.current) onStrokeDeleteRef.current(strokeId);
+        eraserPointsRef.current = [point];
       } else {
         startPointRef.current = point;
         currentPointRef.current = point;
@@ -411,12 +471,10 @@ export default function Canvas({
       if (isPanningRef.current && panStartRef.current) {
         const dx = e.clientX - panStartRef.current.x;
         const dy = e.clientY - panStartRef.current.y;
-        if (onPanChangeRef.current) {
-          onPanChangeRef.current({
-            x: panOffsetStartRef.current.x + dx,
-            y: panOffsetStartRef.current.y + dy,
-          });
-        }
+        updateViewport(viewportRef.current.scale, {
+          x: panOffsetStartRef.current.x + dx,
+          y: panOffsetStartRef.current.y + dy,
+        });
         return;
       }
 
@@ -577,10 +635,82 @@ export default function Canvas({
         });
       } else if (tool === 'eraser') {
         const point = getPoint(e);
-        const strokeId = findStrokeAtPoint(point);
-        if (strokeId && onStrokeDeleteRef.current) onStrokeDeleteRef.current(strokeId);
+        eraserPointsRef.current.push(point);
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = requestAnimationFrame(() => {
+          // Redraw ink with erased areas hidden
+          const eraserRadius = 10 / scaleRef.current;
+          const eraserPts = eraserPointsRef.current;
+          const inkCtx = getCtx(inkCanvasRef.current);
+          if (inkCtx) {
+            const { w, h } = getViewportSize();
+            inkCtx.clearRect(0, 0, w, h);
+            const { panX, panY, scale: s } = getTransform();
+            inkCtx.save();
+            inkCtx.translate(panX, panY);
+            inkCtx.scale(s, s);
+            for (const stroke of strokesRef.current) {
+              // Check if this stroke is hit by any eraser point
+              if ((stroke.type === 'freehand' || stroke.type === 'marker') && stroke.points.length > 0) {
+                // Filter out erased points — check both point proximity and segment distance
+                const r2 = eraserRadius * eraserRadius;
+                const kept = stroke.points.filter((p, idx) => {
+                  for (const ep of eraserPts) {
+                    // Point-in-radius check
+                    const dx = p.x - ep.x;
+                    const dy = p.y - ep.y;
+                    if (dx * dx + dy * dy < r2) return false;
+                    // Segment-distance check: if eraser is close to segment ending at this point
+                    if (idx > 0) {
+                      const prev = stroke.points[idx - 1];
+                      if (distPointToSegment(ep, prev, p) < eraserRadius) return false;
+                    }
+                    if (idx < stroke.points.length - 1) {
+                      const next = stroke.points[idx + 1];
+                      if (distPointToSegment(ep, p, next) < eraserRadius) return false;
+                    }
+                  }
+                  return true;
+                });
+                if (kept.length >= 2) {
+                  // Render kept points as segments
+                  const segments: Point[][] = [];
+                  let seg: Point[] = [];
+                  const pointSet = new Set(kept);
+                  for (const p of stroke.points) {
+                    if (pointSet.has(p)) {
+                      seg.push(p);
+                    } else {
+                      if (seg.length >= 2) segments.push(seg);
+                      seg = [];
+                    }
+                  }
+                  if (seg.length >= 2) segments.push(seg);
+                  for (const s of segments) {
+                    const tmpStroke = { ...stroke, points: s, id: stroke.id };
+                    renderStroke(inkCtx, tmpStroke);
+                  }
+                } else if (kept.length === stroke.points.length) {
+                  renderStroke(inkCtx, stroke);
+                }
+                // else: fully erased, don't render
+              } else {
+                // Check if shape/image is hit
+                let shapeHit = false;
+                for (const ep of eraserPts) {
+                  if (partialEraseStroke(stroke, ep, eraserRadius) !== null) {
+                    shapeHit = true;
+                    break;
+                  }
+                }
+                if (!shapeHit) {
+                  renderStroke(inkCtx, stroke);
+                }
+              }
+            }
+            inkCtx.restore();
+          }
+          // Draw eraser cursor on preview
           clearPreview();
           const ctx = getCtx(previewCanvasRef.current);
           if (ctx) {
@@ -633,6 +763,7 @@ export default function Canvas({
       if (isPanningRef.current) {
         isPanningRef.current = false;
         panStartRef.current = null;
+        flushViewportCommit();
         return;
       }
 
@@ -710,7 +841,79 @@ export default function Canvas({
       }
 
       if (tool === 'eraser') {
+        // Commit partial erase: compute splits for all affected strokes
+        const eraserPts = eraserPointsRef.current;
+        const eraserRadius = 10 / scaleRef.current;
+        if (eraserPts.length > 0 && onEraseCommitRef.current) {
+          const results: { strokeId: string; remaining: Stroke[] }[] = [];
+          for (const stroke of strokesRef.current) {
+            let hit = false;
+            if (stroke.type === 'freehand' || stroke.type === 'marker') {
+              // Collect all points to erase, checking both point proximity and segment distance
+              const r2 = eraserRadius * eraserRadius;
+              const erasedIndices = new Set<number>();
+              for (let i = 0; i < stroke.points.length; i++) {
+                const p = stroke.points[i];
+                for (const ep of eraserPts) {
+                  // Point-in-radius
+                  const dx = p.x - ep.x;
+                  const dy = p.y - ep.y;
+                  if (dx * dx + dy * dy < r2) {
+                    erasedIndices.add(i);
+                    break;
+                  }
+                  // Segment-distance: check segments adjacent to this point
+                  if (i > 0 && distPointToSegment(ep, stroke.points[i - 1], p) < eraserRadius) {
+                    erasedIndices.add(i);
+                    break;
+                  }
+                  if (i < stroke.points.length - 1 && distPointToSegment(ep, p, stroke.points[i + 1]) < eraserRadius) {
+                    erasedIndices.add(i);
+                    break;
+                  }
+                }
+              }
+              if (erasedIndices.size > 0) {
+                hit = true;
+                const segments: Point[][] = [];
+                let seg: Point[] = [];
+                for (let i = 0; i < stroke.points.length; i++) {
+                  if (!erasedIndices.has(i)) {
+                    seg.push(stroke.points[i]);
+                  } else {
+                    if (seg.length >= 2) segments.push(seg);
+                    seg = [];
+                  }
+                }
+                if (seg.length >= 2) segments.push(seg);
+                const remaining = segments.map((pts) => ({
+                  type: stroke.type,
+                  id: uuidv4(),
+                  points: pts,
+                  style: { ...stroke.style },
+                } as Stroke));
+                results.push({ strokeId: stroke.id, remaining });
+              }
+            } else {
+              // Shapes/images: check if any eraser point hits
+              for (const ep of eraserPts) {
+                if (partialEraseStroke(stroke, ep, eraserRadius) !== null) {
+                  hit = true;
+                  break;
+                }
+              }
+              if (hit) {
+                results.push({ strokeId: stroke.id, remaining: [] });
+              }
+            }
+          }
+          if (results.length > 0) {
+            onEraseCommitRef.current(results);
+          }
+        }
+        eraserPointsRef.current = [];
         clearPreview();
+        redrawInk();
         return;
       }
 
@@ -765,16 +968,18 @@ export default function Canvas({
       canvas.removeEventListener('contextmenu', onContextMenu);
       cancelAnimationFrame(rafIdRef.current);
     };
-  }, [getPoint, getCtx, getViewportSize, getTransform, clearPreview, findStrokeAtPoint, findImageAtPoint, drawImageSelection, redrawBackground, redrawInk]);
+  }, [getPoint, getCtx, getViewportSize, getTransform, clearPreview, findStrokeAtPoint, findImageAtPoint, drawImageSelection, redrawBackground, redrawInk, updateViewport, flushViewportCommit]);
 
 
-  const cursorClass = activeTool === 'hand' ? 'cursor-grab' : activeTool === 'select' && pastePreview ? 'cursor-copy' : 'cursor-crosshair';
+  const eraserCursorSvg = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Ccircle cx='11' cy='11' r='9.5' fill='none' stroke='black' stroke-width='2'/%3E%3Ccircle cx='11' cy='11' r='9.5' fill='none' stroke='white' stroke-width='1'/%3E%3C/svg%3E") 11 11, auto`;
+  const cursorClass = activeTool === 'hand' ? 'cursor-grab' : activeTool === 'select' && pastePreview ? 'cursor-copy' : activeTool === 'eraser' ? '' : 'cursor-crosshair';
+  const cursorStyle = activeTool === 'eraser' ? { cursor: eraserCursorSvg } : undefined;
 
   return (
     <div className="fixed inset-0 overflow-hidden">
-      <canvas ref={bgCanvasRef} className={`absolute inset-0 touch-none ${cursorClass}`} />
-      <canvas ref={inkCanvasRef} className={`absolute inset-0 touch-none ${cursorClass}`} />
-      <canvas ref={previewCanvasRef} className={`absolute inset-0 touch-none ${cursorClass}`} />
+      <canvas ref={bgCanvasRef} className={`absolute inset-0 touch-none ${cursorClass}`} style={cursorStyle} />
+      <canvas ref={inkCanvasRef} className={`absolute inset-0 touch-none ${cursorClass}`} style={cursorStyle} />
+      <canvas ref={previewCanvasRef} className={`absolute inset-0 touch-none ${cursorClass}`} style={cursorStyle} />
 
       {/* Image selection controls — hidden while dragging */}
       {selectedImage && selPos && activeTool === 'hand' && !isDragging && (

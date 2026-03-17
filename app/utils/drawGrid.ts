@@ -5,13 +5,18 @@ export function drawBackground(
   width: number,
   height: number,
   pattern: BackgroundPattern,
-  color: string
+  color: string,
+  startX: number = 0,
+  startY: number = 0
 ): void {
   // Fill background color
   ctx.fillStyle = color;
-  ctx.fillRect(0, 0, width, height);
+  ctx.fillRect(startX, startY, width, height);
 
   if (pattern === 'blank') return;
+
+  const endX = startX + width;
+  const endY = startY + height;
 
   // Determine line color based on background brightness
   const isDark = isColorDark(color);
@@ -21,13 +26,13 @@ export function drawBackground(
 
   switch (pattern) {
     case 'grid':
-      drawGrid(ctx, width, height, lineColor, strongLineColor);
+      drawGrid(ctx, startX, startY, endX, endY, lineColor, strongLineColor);
       break;
     case 'dotgrid':
-      drawDotGrid(ctx, width, height, dotColor);
+      drawDotGrid(ctx, startX, startY, endX, endY, dotColor);
       break;
     case 'ruled':
-      drawRuled(ctx, width, height, lineColor, strongLineColor);
+      drawRuled(ctx, startX, startY, endX, endY, lineColor, strongLineColor);
       break;
   }
 }
@@ -39,59 +44,86 @@ function isColorDark(hex: string): boolean {
   return (r * 299 + g * 587 + b * 114) / 1000 < 128;
 }
 
+function snapFloor(value: number, step: number): number {
+  return Math.floor(value / step) * step;
+}
+
+function snapCeil(value: number, step: number): number {
+  return Math.ceil(value / step) * step;
+}
+
 function drawGrid(
   ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
   lineColor: string,
   strongLineColor: string
 ): void {
   const smallStep = 20;
   const bigStep = 100;
 
+  const x0 = snapFloor(startX, smallStep);
+  const y0 = snapFloor(startY, smallStep);
+  const x1 = snapCeil(endX, smallStep);
+  const y1 = snapCeil(endY, smallStep);
+
   // Small grid
   ctx.strokeStyle = lineColor;
   ctx.lineWidth = 0.5;
   ctx.beginPath();
-  for (let x = smallStep; x < width; x += smallStep) {
+  for (let x = x0; x <= x1; x += smallStep) {
     if (x % bigStep === 0) continue;
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
+    ctx.moveTo(x, startY);
+    ctx.lineTo(x, endY);
   }
-  for (let y = smallStep; y < height; y += smallStep) {
+  for (let y = y0; y <= y1; y += smallStep) {
     if (y % bigStep === 0) continue;
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
+    ctx.moveTo(startX, y);
+    ctx.lineTo(endX, y);
   }
   ctx.stroke();
 
   // Large grid
+  const bx0 = snapFloor(startX, bigStep);
+  const by0 = snapFloor(startY, bigStep);
+  const bx1 = snapCeil(endX, bigStep);
+  const by1 = snapCeil(endY, bigStep);
+
   ctx.strokeStyle = strongLineColor;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  for (let x = bigStep; x < width; x += bigStep) {
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
+  for (let x = bx0; x <= bx1; x += bigStep) {
+    ctx.moveTo(x, startY);
+    ctx.lineTo(x, endY);
   }
-  for (let y = bigStep; y < height; y += bigStep) {
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
+  for (let y = by0; y <= by1; y += bigStep) {
+    ctx.moveTo(startX, y);
+    ctx.lineTo(endX, y);
   }
   ctx.stroke();
 }
 
 function drawDotGrid(
   ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
   dotColor: string
 ): void {
   const step = 20;
   const dotRadius = 1;
 
+  const x0 = snapFloor(startX, step);
+  const y0 = snapFloor(startY, step);
+  const x1 = snapCeil(endX, step);
+  const y1 = snapCeil(endY, step);
+
   ctx.fillStyle = dotColor;
-  for (let x = step; x < width; x += step) {
-    for (let y = step; y < height; y += step) {
+  for (let x = x0; x <= x1; x += step) {
+    for (let y = y0; y <= y1; y += step) {
       ctx.beginPath();
       ctx.arc(x, y, dotRadius, 0, Math.PI * 2);
       ctx.fill();
@@ -101,20 +133,25 @@ function drawDotGrid(
 
 function drawRuled(
   ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
   lineColor: string,
   strongLineColor: string
 ): void {
   const step = 32;
 
+  const y0 = snapFloor(startY, step);
+  const y1 = snapCeil(endY, step);
+
   // Horizontal ruled lines
   ctx.strokeStyle = lineColor;
   ctx.lineWidth = 0.5;
   ctx.beginPath();
-  for (let y = step; y < height; y += step) {
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
+  for (let y = y0; y <= y1; y += step) {
+    ctx.moveTo(startX, y);
+    ctx.lineTo(endX, y);
   }
   ctx.stroke();
 
@@ -122,7 +159,7 @@ function drawRuled(
   ctx.strokeStyle = strongLineColor;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(80, 0);
-  ctx.lineTo(80, height);
+  ctx.moveTo(80, startY);
+  ctx.lineTo(80, endY);
   ctx.stroke();
 }

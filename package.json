@@ -1,6 +1,6 @@
 {
-  "name": "whiteboard-init",
-  "version": "1.1.0",
+  "name": "whiteboard",
+  "version": "1.1.1",
   "private": true,
   "scripts": {
     "dev": "next dev",

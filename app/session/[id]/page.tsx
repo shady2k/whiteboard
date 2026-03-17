@@ -2,6 +2,10 @@ import getDb from '@/app/lib/db';
 import WhiteboardLoader from '@/app/components/Whiteboard/WhiteboardLoader';
 import { Page } from '@/app/types';
 
+// Disable Next.js router cache — ensures fresh server data and full remount
+// when navigating back to a session (canvas state doesn't survive cache reuse)
+export const dynamic = 'force-dynamic';
+
 interface SessionRow {
   id: string;
   name: string;
@@ -43,6 +47,7 @@ export default async function SessionPage({
         sessionId={id}
         initialPages={[]}
         sessionName="Untitled"
+        serverSessionExists={false}
       />
     );
   }
@@ -75,6 +80,7 @@ export default async function SessionPage({
       sessionId={id}
       initialPages={pages}
       sessionName={session.name}
+      serverSessionExists={true}
     />
   );
 }

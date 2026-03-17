@@ -1,100 +1,104 @@
-const CACHE_NAME = 'whiteboard-v2';
+const SW_VERSION = new URL(self.location.href).searchParams.get('v') || 'dev';
+const CACHE_PREFIX = 'whiteboard';
+const CACHE_NAME = `${CACHE_PREFIX}-${SW_VERSION}`;
+const PRECACHE_URLS = ['/'];
 
-const PRECACHE_URLS = [
-  '/',
-];
+function isCacheable(response) {
+  return response && response.ok;
+}
 
-// Install: cache app shell
+async function putInCache(request, response) {
+  if (!isCacheable(response)) return response;
+  const cache = await caches.open(CACHE_NAME);
+  await cache.put(request, response.clone());
+  return response;
+}
+
+async function matchInCache(request) {
+  const cache = await caches.open(CACHE_NAME);
+  return cache.match(request);
+}
+
+async function networkFirst(request, fallbackUrl) {
+  try {
+    const response = await fetch(request);
+    return await putInCache(request, response);
+  } catch (error) {
+    const cached = await matchInCache(request);
+    if (cached) return cached;
+
+    if (fallbackUrl) {
+      const fallback = await matchInCache(fallbackUrl);
+      if (fallback) return fallback;
+    }
+
+    throw error;
+  }
+}
+
+async function cacheFirst(request) {
+  const cached = await matchInCache(request);
+  if (cached) return cached;
+
+  const response = await fetch(request);
+  return putInCache(request, response);
+}
+
+// Install: cache app shell (don't skipWaiting — let client control activation)
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS))
   );
-  self.skipWaiting();
 });
 
-// Activate: clean old caches
+// Activate: clean old caches, then claim clients
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
+      Promise.all(
+        keys
+          .filter((key) => key.startsWith(`${CACHE_PREFIX}-`) && key !== CACHE_NAME)
+          .map((key) => caches.delete(key))
+      )
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
+});
+
+// Client tells us when it's ready for the new version
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
 
 // Fetch handler
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
+  const { request } = event;
 
-  // Never cache API mutations
-  if (url.pathname.startsWith('/api/') && event.request.method !== 'GET') {
+  if (request.method !== 'GET') return;
+
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+
+  // Navigation: network-first, fall back to cached app shell
+  if (request.mode === 'navigate') {
+    event.respondWith(networkFirst(request, '/'));
     return;
   }
 
-  // API GET requests: network-first with cache fallback
+  // API: network-only, no caching (mutable collaborative state)
   if (url.pathname.startsWith('/api/')) {
-    event.respondWith(
-      fetch(event.request)
-        .then((response) => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          }
-          return response;
-        })
-        .catch(() => caches.match(event.request))
-    );
     return;
   }
 
-  // Static assets: network-first for JS/CSS (so code updates are picked up),
-  // cache-first for immutable assets (images, fonts)
-  if (url.pathname.match(/\.(js|css|mjs)$/)) {
-    event.respondWith(
-      fetch(event.request)
-        .then((response) => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          }
-          return response;
-        })
-        .catch(() => caches.match(event.request))
-    );
+  // JS/CSS: network-first so code updates are picked up
+  if (request.destination === 'script' || request.destination === 'style') {
+    event.respondWith(networkFirst(request));
     return;
   }
 
-  if (
-    url.pathname.match(/\.(png|jpg|jpeg|gif|webp|svg|ico|woff|woff2|ttf|eot)$/)
-  ) {
-    event.respondWith(
-      caches.match(event.request).then((cached) => {
-        if (cached) return cached;
-        return fetch(event.request).then((response) => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          }
-          return response;
-        });
-      })
-    );
-    return;
-  }
-
-  // Navigation (HTML pages): network-first, fall back to cached app shell
-  if (event.request.mode === 'navigate') {
-    event.respondWith(
-      fetch(event.request)
-        .then((response) => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          return response;
-        })
-        .catch(() =>
-          caches.match(event.request).then((cached) => cached || caches.match('/'))
-        )
-    );
-    return;
+  // Images/fonts: cache-first (immutable assets)
+  if (request.destination === 'image' || request.destination === 'font') {
+    event.respondWith(cacheFirst(request));
   }
 });
