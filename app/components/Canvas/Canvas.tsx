@@ -12,6 +12,7 @@ import { getCachedImage } from '@/app/utils/imageCache';
 import { strokeIntersectsRect, findStrokeAtPoint as findStrokeAtPointUtil, computeEraseResult } from '@/app/utils/strokeBounds';
 import { offsetStroke } from '@/app/utils/strokeTransform';
 import { useImageDrag } from '@/app/hooks/useImageDrag';
+import { simplifyPoints } from '@/app/utils/simplifyPoints';
 import { v4 as uuidv4 } from 'uuid';
 
 interface CanvasProps {
@@ -860,7 +861,8 @@ export default function Canvas({
 
       if ((tool === 'pen' || tool === 'marker') && currentPointsRef.current.length > 0) {
         const strokeType = tool === 'marker' ? 'marker' : 'freehand';
-        const stroke: FreehandStroke | MarkerStroke = { type: strokeType, id: uuidv4(), points: [...currentPointsRef.current], style: { ...style } };
+        const points = simplifyPoints([...currentPointsRef.current]);
+        const stroke: FreehandStroke | MarkerStroke = { type: strokeType, id: uuidv4(), points, style: { ...style } };
         onStrokeCompleteRef.current(stroke);
         drawCommittedStrokeToInk(stroke);
         currentPointsRef.current = [];

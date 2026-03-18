@@ -79,6 +79,17 @@ function initSchema(db: Database.Database) {
     db.exec("ALTER TABLE sessions ADD COLUMN deleted_at TEXT DEFAULT NULL");
   }
 
+  // Migration: split revision into strokes_revision + background_revision
+  const pagesCols = db.prepare("PRAGMA table_info(pages)").all() as { name: string }[];
+  if (!pagesCols.some(c => c.name === 'strokes_revision')) {
+    db.exec("ALTER TABLE pages ADD COLUMN strokes_revision INTEGER NOT NULL DEFAULT 0");
+    // Seed from existing revision
+    db.exec("UPDATE pages SET strokes_revision = revision");
+  }
+  if (!pagesCols.some(c => c.name === 'background_revision')) {
+    db.exec("ALTER TABLE pages ADD COLUMN background_revision INTEGER NOT NULL DEFAULT 0");
+  }
+
   // Migration: add snippets table
   db.exec(`
     CREATE TABLE IF NOT EXISTS snippets (

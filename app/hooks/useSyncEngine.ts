@@ -181,8 +181,9 @@ export function useSyncEngine(sessionId: string) {
   const pendingPageRef = useRef<Page | null>(null);
   const pendingBgRef = useRef<Page | null>(null);
   const syncingRef = useRef(false);
-  // Track server revision per page for optimistic concurrency
-  const pageRevisionRef = useRef<Record<string, number>>({});
+  // Track server revisions per page (split: strokes vs background)
+  const strokesRevisionRef = useRef<Record<string, number>>({});
+  const bgRevisionRef = useRef<Record<string, number>>({});
   const onConflictRef = useRef<((serverStrokes: Stroke[]) => void) | null>(null);
   // Server snapshot per page for diff computation
   const serverSnapshotRef = useRef<Record<string, ServerSnapshot>>({});
@@ -206,7 +207,7 @@ export function useSyncEngine(sessionId: string) {
   const handleConflict = useCallback(
     async (latestPage: Page, body: { revision: number; strokes: Stroke[] }, actionId: string) => {
       console.warn('Page sync conflict — accepting server version, revision:', body.revision);
-      pageRevisionRef.current[latestPage.id] = body.revision;
+      strokesRevisionRef.current[latestPage.id] = body.revision;
       serverSnapshotRef.current[latestPage.id] = buildSnapshot(body.strokes);
       const serverPage: Page = { ...latestPage, strokes: body.strokes };
       await putPage(serverPage, 0);
@@ -284,7 +285,7 @@ export function useSyncEngine(sessionId: string) {
               removed,
               strokeOrder,
               actionId,
-              expectedRevision: pageRevisionRef.current[latestPage.id],
+              expectedRevision: strokesRevisionRef.current[latestPage.id],
             }),
           });
         } else {
@@ -297,7 +298,7 @@ export function useSyncEngine(sessionId: string) {
               sessionId,
               strokes: resolvedStrokes,
               actionId,
-              expectedRevision: pageRevisionRef.current[latestPage.id],
+              expectedRevision: strokesRevisionRef.current[latestPage.id],
             }),
           });
         }
@@ -322,7 +323,7 @@ export function useSyncEngine(sessionId: string) {
         }
         const result = await res.json();
         if (result.revision !== undefined) {
-          pageRevisionRef.current[latestPage.id] = result.revision;
+          strokesRevisionRef.current[latestPage.id] = result.revision;
         }
         // Update snapshot to reflect what the server now has
         serverSnapshotRef.current[latestPage.id] = buildSnapshot(resolvedStrokes);
@@ -367,7 +368,7 @@ export function useSyncEngine(sessionId: string) {
         }
         const result = await res.json();
         if (result.revision !== undefined) {
-          pageRevisionRef.current[latestPage.id] = result.revision;
+          bgRevisionRef.current[latestPage.id] = result.revision;
         }
         await clearPendingAction(actionId);
       } catch (e) {
@@ -465,10 +466,12 @@ export function useSyncEngine(sessionId: string) {
   const tryThumbnailSync = useCallback(
     (dataUrl: string) => {
       if (!navigator.onLine) return;
+      // keepalive ensures the request completes even during page unload
       fetch(`/api/sessions/${sessionId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ thumbnail: dataUrl }),
+        keepalive: true,
       }).catch(() => {});
     },
     [sessionId]
@@ -503,7 +506,7 @@ export function useSyncEngine(sessionId: string) {
   }, []);
 
   const setPageRevision = useCallback((pageId: string, revision: number) => {
-    pageRevisionRef.current[pageId] = revision;
+    strokesRevisionRef.current[pageId] = revision;
   }, []);
 
   const initServerSnapshot = useCallback((pageId: string, strokes: Stroke[]) => {

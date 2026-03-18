@@ -13,6 +13,7 @@ import { drawBackground } from '@/app/utils/drawGrid';
 import { renderAllStrokes } from '@/app/utils/renderStroke';
 import { normalizeStrokes, denormalizeStrokes } from '@/app/utils/snippetUtils';
 import Image from 'next/image';
+import Link from 'next/link';
 
 interface WhiteboardProps {
   sessionId: string;
@@ -99,13 +100,21 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   const pageRef = useRef(page);
   pageRef.current = page;
 
-  // Generate thumbnail: save to IDB immediately, debounce only the server sync.
-  const thumbSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastThumbRef = useRef<string | null>(null);
-  const generateAndSaveThumbRef = useRef<() => void>(null);
+  // Generate and save thumbnail only when leaving the canvas (unmount, visibility hidden, pagehide).
+  // Zero overhead during drawing.
+  const bgPatternRef = useRef(page?.backgroundPattern || 'blank');
+  const bgColorRef = useRef(page?.backgroundColor || '#ffffff');
+  bgPatternRef.current = page?.backgroundPattern || 'blank';
+  bgColorRef.current = page?.backgroundColor || '#ffffff';
 
-  const generateAndSaveThumb = useCallback(() => {
-    if (strokesRef.current.length === 0) return;
+  const thumbSentRef = useRef(false);
+  const generateAndSyncThumb = useCallback(() => {
+    // Guard against double-fire (unmount + pagehide/visibilitychange race)
+    if (thumbSentRef.current) return;
+    thumbSentRef.current = true;
+    // Reset after a short delay so future leave events still work
+    setTimeout(() => { thumbSentRef.current = false; }, 1000);
+
     try {
       const canvas = document.createElement('canvas');
       const vw = window.innerWidth;
@@ -117,50 +126,34 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.scale(tw / vw, th / vh);
-      drawBackground(ctx, vw, vh, page?.backgroundPattern || 'blank', page?.backgroundColor || '#ffffff');
-      renderAllStrokes(ctx, strokesRef.current, () => {
-        generateAndSaveThumbRef.current?.();
-      });
+      drawBackground(ctx, vw, vh, bgPatternRef.current, bgColorRef.current);
+      if (strokesRef.current.length > 0) {
+        renderAllStrokes(ctx, strokesRef.current);
+      }
       const dataUrl = canvas.toDataURL('image/png', 0.7);
-      lastThumbRef.current = dataUrl;
 
+      // Save to IDB (for instant display on session list)
       getSession(sessionId).then(s => {
         if (s) putSession({ ...s, thumbnail: dataUrl }).catch(() => {});
       }).catch(() => {});
 
-      if (thumbSyncTimerRef.current) clearTimeout(thumbSyncTimerRef.current);
-      thumbSyncTimerRef.current = setTimeout(() => {
-        tryThumbnailSync(dataUrl);
-        thumbSyncTimerRef.current = null;
-      }, 2000);
+      // Sync to server
+      tryThumbnailSync(dataUrl);
     } catch {}
-  }, [sessionId, page, tryThumbnailSync]);
-  useEffect(() => { generateAndSaveThumbRef.current = generateAndSaveThumb; }, [generateAndSaveThumb]);
+  }, [sessionId, tryThumbnailSync]);
 
   useEffect(() => {
-    generateAndSaveThumb();
-  }, [strokes, generateAndSaveThumb, page?.backgroundPattern, page?.backgroundColor]);
-
-  // Flush pending server sync on unmount / page hide
-  useEffect(() => {
-    const flushServerSync = () => {
-      if (thumbSyncTimerRef.current && lastThumbRef.current) {
-        clearTimeout(thumbSyncTimerRef.current);
-        thumbSyncTimerRef.current = null;
-        tryThumbnailSync(lastThumbRef.current);
-      }
-    };
     const handleVisChange = () => {
-      if (document.visibilityState === 'hidden') flushServerSync();
+      if (document.visibilityState === 'hidden') generateAndSyncThumb();
     };
     document.addEventListener('visibilitychange', handleVisChange);
-    window.addEventListener('pagehide', flushServerSync);
+    window.addEventListener('pagehide', generateAndSyncThumb);
     return () => {
       document.removeEventListener('visibilitychange', handleVisChange);
-      window.removeEventListener('pagehide', flushServerSync);
-      flushServerSync();
+      window.removeEventListener('pagehide', generateAndSyncThumb);
+      generateAndSyncThumb();
     };
-  }, [tryThumbnailSync]);
+  }, [generateAndSyncThumb]);
 
   const updatePageStrokes = useCallback((pageId: string, updater: (strokes: Stroke[]) => Stroke[]) => {
     setPage(prev => {
@@ -470,12 +463,12 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         <div className="text-neutral-400 text-sm flex flex-col items-center gap-4">
           <div className="text-lg font-medium text-neutral-300">Session not found</div>
           <p className="text-neutral-500">This whiteboard session doesn&apos;t exist or has been deleted.</p>
-          <a
+          <Link
             href="/"
             className="mt-2 px-4 py-2 rounded-lg bg-neutral-700 hover:bg-neutral-600 text-neutral-200 transition-colors"
           >
             Go to Home
-          </a>
+          </Link>
         </div>
       </div>
     );

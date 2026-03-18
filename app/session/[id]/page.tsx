@@ -20,6 +20,7 @@ interface PageRow {
   background_pattern: string;
   background_color: string;
   revision: number;
+  strokes_revision: number;
 }
 
 interface StrokeRow {
@@ -68,7 +69,7 @@ export default async function SessionPage({
       position: page.position,
       backgroundPattern: page.background_pattern as Page['backgroundPattern'],
       backgroundColor: page.background_color,
-      revision: page.revision,
+      revision: page.strokes_revision,
       strokes: strokeRows.map(s => ({
         ...JSON.parse(s.data),
         id: s.id,

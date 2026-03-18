@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Stroke, Point, FreehandStroke, MarkerStroke } from '@/app/types';
+import { simplifyPoints } from './simplifyPoints';
 
 export interface BoundingBox {
   minX: number;
@@ -385,13 +386,26 @@ export function computeEraseResult(
       if (frag.length >= 2) fragments.push(frag);
     }
 
-    const remaining = fragments.map((fragPts) => ({
-      type: stroke.type,
-      id: preview ? stroke.id : uuidv4(),
-      points: fragPts,
-      style: stroke.style,
-      ...((stroke as FreehandStroke).geometric ? { geometric: true } : {}),
-    } as Stroke));
+    // Simplify fragment points and drop tiny/degenerate remnants
+    const remaining: Stroke[] = [];
+    for (const fragPts of fragments) {
+      const simplified = simplifyPoints(fragPts);
+      if (simplified.length < 2) continue;
+      // Drop degenerate fragments (sub-pixel total length after rounding)
+      const totalLen = simplified.reduce((acc, p, i) => {
+        if (i === 0) return 0;
+        const prev = simplified[i - 1];
+        return acc + Math.sqrt((p.x - prev.x) ** 2 + (p.y - prev.y) ** 2);
+      }, 0);
+      if (totalLen < 1) continue; // less than 1px total length
+      remaining.push({
+        type: stroke.type,
+        id: preview ? stroke.id : uuidv4(),
+        points: simplified,
+        style: stroke.style,
+        ...((stroke as FreehandStroke).geometric ? { geometric: true } : {}),
+      } as Stroke);
+    }
     return { hit: true, remaining };
   }
 

@@ -46,12 +46,12 @@ export async function PUT(request: Request) {
   let newRevision = 0;
   const transaction = db.transaction(() => {
     db.prepare(
-      'UPDATE pages SET background_pattern = ?, background_color = ?, revision = revision + 1 WHERE id = ?'
+      'UPDATE pages SET background_pattern = ?, background_color = ?, background_revision = background_revision + 1 WHERE id = ?'
     ).run(backgroundPattern, backgroundColor, pageId);
 
-    const updated = db.prepare('SELECT revision, session_id FROM pages WHERE id = ?').get(pageId) as { revision: number; session_id: string } | undefined;
+    const updated = db.prepare('SELECT background_revision, session_id FROM pages WHERE id = ?').get(pageId) as { background_revision: number; session_id: string } | undefined;
     if (updated) {
-      newRevision = updated.revision;
+      newRevision = updated.background_revision;
       const now = new Date().toISOString();
       db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, updated.session_id);
     }

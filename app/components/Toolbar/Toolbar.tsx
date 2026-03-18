@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import Link from 'next/link';
 import { ToolType, StrokeStyle, BackgroundPattern } from '@/app/types';
 
 interface PenConfig {
@@ -140,13 +141,13 @@ export default function Toolbar({
       )}
       <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-50 bg-neutral-900/85 backdrop-blur-md rounded-2xl px-2 py-1.5 flex items-center gap-0.5 shadow-xl">
         {/* Left tools */}
-        <a
+        <Link
           href="/"
           className="w-9 h-9 rounded-lg flex items-center justify-center text-neutral-400 no-underline transition-colors hover:bg-white/10 hover:text-white"
           title="Back to sessions"
         >
           <BackIcon />
-        </a>
+        </Link>
 
         <Divider />
 

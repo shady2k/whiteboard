@@ -37,17 +37,17 @@ export async function PUT(request: Request) {
   const claimed = tryClaimAction(actionId, 'pageSync');
   if (claimed) return claimed;
 
-  // Revision check: if client sends expectedRevision, verify it matches
+  // Strokes-specific revision check
   if (expectedRevision !== undefined) {
-    const page = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number } | undefined;
-    if (page && page.revision !== expectedRevision) {
+    const page = db.prepare('SELECT strokes_revision FROM pages WHERE id = ?').get(pageId) as { strokes_revision: number } | undefined;
+    if (page && page.strokes_revision !== expectedRevision) {
       const currentStrokes = (db.prepare(
         'SELECT id, type, data FROM strokes WHERE page_id = ? ORDER BY z_order'
       ).all(pageId) as Array<{ id: string; type: string; data: string }>)
         .map(s => ({ ...JSON.parse(s.data), id: s.id, type: s.type }));
       return NextResponse.json({
         conflict: true,
-        revision: page.revision,
+        revision: page.strokes_revision,
         strokes: currentStrokes,
       }, { status: 409 });
     }
@@ -76,9 +76,9 @@ export async function PUT(request: Request) {
       const { id, type, ...rest } = stroke;
       upsert.run(id, pageId, type, JSON.stringify(rest), i);
     }
-    db.prepare('UPDATE pages SET revision = revision + 1 WHERE id = ?').run(pageId);
-    const updated = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number };
-    newRevision = updated.revision;
+    db.prepare('UPDATE pages SET strokes_revision = strokes_revision + 1 WHERE id = ?').run(pageId);
+    const updated = db.prepare('SELECT strokes_revision FROM pages WHERE id = ?').get(pageId) as { strokes_revision: number };
+    newRevision = updated.strokes_revision;
     db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
   });
   transaction();
@@ -105,17 +105,17 @@ export async function PATCH(request: Request) {
   const claimed = tryClaimAction(actionId, 'pageSync');
   if (claimed) return claimed;
 
-  // Revision check
+  // Strokes-specific revision check (independent of background_revision)
   if (expectedRevision !== undefined) {
-    const page = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number } | undefined;
-    if (page && page.revision !== expectedRevision) {
+    const page = db.prepare('SELECT strokes_revision FROM pages WHERE id = ?').get(pageId) as { strokes_revision: number } | undefined;
+    if (page && page.strokes_revision !== expectedRevision) {
       const currentStrokes = (db.prepare(
         'SELECT id, type, data FROM strokes WHERE page_id = ? ORDER BY z_order'
       ).all(pageId) as Array<{ id: string; type: string; data: string }>)
         .map(s => ({ ...JSON.parse(s.data), id: s.id, type: s.type }));
       return NextResponse.json({
         conflict: true,
-        revision: page.revision,
+        revision: page.strokes_revision,
         strokes: currentStrokes,
       }, { status: 409 });
     }
@@ -183,9 +183,9 @@ export async function PATCH(request: Request) {
       }
     }
 
-    db.prepare('UPDATE pages SET revision = revision + 1 WHERE id = ?').run(pageId);
-    const updated = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number };
-    newRevision = updated.revision;
+    db.prepare('UPDATE pages SET strokes_revision = strokes_revision + 1 WHERE id = ?').run(pageId);
+    const updated = db.prepare('SELECT strokes_revision FROM pages WHERE id = ?').get(pageId) as { strokes_revision: number };
+    newRevision = updated.strokes_revision;
     db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
   });
   try {
