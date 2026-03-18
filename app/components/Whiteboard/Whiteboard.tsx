@@ -4,15 +4,18 @@ import { useState, useCallback, useEffect, useRef, useMemo, startTransition } fr
 import { Stroke, ToolType, StrokeStyle, Page, BackgroundPattern, ImageStroke } from '@/app/types';
 import Canvas from '@/app/components/Canvas/Canvas';
 import Toolbar from '@/app/components/Toolbar/Toolbar';
+import SelectionActionBar from '@/app/components/Whiteboard/SelectionActionBar';
+import Cheatsheet from '@/app/components/Whiteboard/Cheatsheet';
+import PdfPageDialog from '@/app/components/Whiteboard/PdfPageDialog';
 import { useIDBState } from '@/app/hooks/useIDBState';
 import { useSyncEngine } from '@/app/hooks/useSyncEngine';
 import { useUndoRedo } from '@/app/hooks/useUndoRedo';
+import { useKeyboardShortcuts } from '@/app/hooks/useKeyboardShortcuts';
 import { getSession, putSession } from '@/app/lib/idb';
 import { useFileOperations } from '@/app/hooks/useFileOperations';
 import { drawBackground } from '@/app/utils/drawGrid';
 import { renderAllStrokes } from '@/app/utils/renderStroke';
 import { normalizeStrokes, denormalizeStrokes } from '@/app/utils/snippetUtils';
-import Image from 'next/image';
 import Link from 'next/link';
 
 interface WhiteboardProps {
@@ -290,100 +293,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     setPanOffset({ x: 0, y: 0 });
   }, []);
 
-  const handleExportPngRef = useRef<() => void>(() => {});
-  const handleExportPdfRef = useRef<() => void>(() => {});
-  const handleImportFileRef = useRef<() => void>(() => {});
-  const copySelectionRef = useRef<(() => void) | null>(null);
-  const deleteSelectionRef = useRef<(() => void) | null>(null);
-  const pasteFromClipboardRef = useRef<(() => void) | null>(null);
-  const clipboardRef = useRef<Stroke[] | null>(null);
-
   const [pendingSelection, setPendingSelection] = useState<{ strokes: Stroke[]; bounds: { x: number; y: number; width: number; height: number } } | null>(null);
-  const pendingSelectionRef = useRef(pendingSelection);
-
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const isCmd = e.metaKey || e.ctrlKey;
-      const isEditing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
-
-      if (isCmd && e.key === 'c' && !e.shiftKey && !isEditing) {
-        if (pendingSelectionRef.current && copySelectionRef.current) {
-          e.preventDefault();
-          copySelectionRef.current();
-        }
-        return;
-      } else if (isCmd && e.key === 'v' && !e.shiftKey && !isEditing) {
-        if (clipboardRef.current) {
-          e.preventDefault();
-          pasteFromClipboardRef.current?.();
-        }
-        return;
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && !isEditing && pendingSelectionRef.current) {
-        e.preventDefault();
-        deleteSelectionRef.current?.();
-        return;
-      } else if (isCmd && e.key === 'z' && !e.shiftKey) {
-        e.preventDefault();
-        undo();
-      } else if (isCmd && e.key === 'z' && e.shiftKey) {
-        e.preventDefault();
-        redo();
-      } else if (isCmd && e.key === 'y') {
-        e.preventDefault();
-        redo();
-      } else if (isCmd && (e.key === '=' || e.key === '+')) {
-        e.preventDefault();
-        zoomIn();
-      } else if (isCmd && e.key === '-') {
-        e.preventDefault();
-        zoomOut();
-      } else if (isCmd && e.key === '0') {
-        e.preventDefault();
-        zoomReset();
-      } else if (isCmd && e.shiftKey && e.key.toLowerCase() === 'e') {
-        e.preventDefault();
-        handleExportPngRef.current();
-      } else if (isCmd && e.shiftKey && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        handleExportPdfRef.current();
-      } else if (isCmd && e.shiftKey && e.key.toLowerCase() === 'i') {
-        e.preventDefault();
-        handleImportFileRef.current();
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        setShowCheatsheet(v => {
-          if (v) return false;
-          setPendingSelection(null);
-          setActiveTool('pen');
-          return false;
-        });
-      } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
-        e.preventDefault();
-        setShowCheatsheet(v => !v);
-      } else if (!isCmd && !e.altKey && !e.shiftKey) {
-        switch (e.key.toLowerCase()) {
-          case 'p': setActiveTool('pen'); break;
-          case 'm': setActiveTool('marker'); break;
-          case 'e': setActiveTool('eraser'); break;
-          case 'h': setActiveTool('hand'); break;
-          case 'l': setActiveTool('line'); break;
-          case 'r': setActiveTool('rect'); break;
-          case 't': setActiveTool('triangle'); break;
-          case 'o': setActiveTool('ellipse'); break;
-          case 'a': setActiveTool('axes'); break;
-          case 's': setActiveTool('select'); break;
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, zoomIn, zoomOut, zoomReset]);
-
-  useEffect(() => { handleExportPngRef.current = handleExportPng; }, [handleExportPng]);
-  useEffect(() => { handleExportPdfRef.current = handleExportPdf; }, [handleExportPdf]);
-  useEffect(() => { handleImportFileRef.current = handleImportFile; }, [handleImportFile]);
 
   const handleImageTransform = useCallback((strokeId: string, newStroke: ImageStroke) => {
     const pageId = page?.id;
@@ -400,10 +310,6 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
   const handleSelectionComplete = useCallback((selectedStrokes: Stroke[], bounds: { x: number; y: number; width: number; height: number }) => {
     setPendingSelection({ strokes: selectedStrokes, bounds });
-  }, []);
-
-  const clearSelection = useCallback(() => {
-    setPendingSelection(null);
   }, []);
 
   const copySelection = useCallback(() => {
@@ -436,12 +342,24 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
   }, [clipboard, page, setPage, pushCommand, queuePageSync, screenToCanvas]);
 
 
-  // Keep refs updated for keyboard shortcuts
-  useEffect(() => { copySelectionRef.current = copySelection; }, [copySelection]);
-  useEffect(() => { deleteSelectionRef.current = deleteSelection; }, [deleteSelection]);
-  useEffect(() => { pasteFromClipboardRef.current = pasteFromClipboard; }, [pasteFromClipboard]);
-  useEffect(() => { clipboardRef.current = clipboard; }, [clipboard]);
-  useEffect(() => { pendingSelectionRef.current = pendingSelection; }, [pendingSelection]);
+  useKeyboardShortcuts({
+    undo,
+    redo,
+    zoomIn,
+    zoomOut,
+    zoomReset,
+    setActiveTool,
+    setShowCheatsheet,
+    setPendingSelection,
+    handleExportPng,
+    handleExportPdf,
+    handleImportFile,
+    copySelection,
+    deleteSelection,
+    pasteFromClipboard,
+    pendingSelection,
+    clipboard,
+  });
 
   const handleZoomChange = useCallback((z: number) => startTransition(() => setZoom(z)), []);
   const handlePanChange = useCallback((p: { x: number; y: number }) => startTransition(() => setPanOffset(p)), []);
@@ -558,282 +476,5 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       )}
       {showCheatsheet && <Cheatsheet onClose={() => setShowCheatsheet(false)} />}
     </>
-  );
-}
-
-const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);
-const MOD = isMac ? '\u2318' : 'Ctrl';
-const SHIFT = isMac ? '\u21E7' : 'Shift';
-
-function SelectionActionBar({ bounds, zoom, panOffset, onCopy, onDelete }: {
-  bounds: { x: number; y: number; width: number; height: number };
-  zoom: number;
-  panOffset: { x: number; y: number };
-  onCopy: () => void;
-  onDelete: () => void;
-}) {
-  const w = typeof window !== 'undefined' ? window.innerWidth : 0;
-  const h = typeof window !== 'undefined' ? window.innerHeight : 0;
-  const s = zoom;
-  const pX = (w / 2) * (1 - s) + panOffset.x;
-  const pY = (h / 2) * (1 - s) + panOffset.y;
-  const screenX = (bounds.x + bounds.width / 2) * s + pX;
-  const screenY = (bounds.y + bounds.height) * s + pY + 12;
-  return (
-    <div
-      className="fixed z-50 bg-neutral-900/90 backdrop-blur-md rounded-lg px-1.5 py-1 flex items-center gap-1 shadow-xl border border-neutral-700/50 animate-slide-up"
-      style={{ left: screenX, top: screenY, transform: 'translateX(-50%)' }}
-      onPointerDown={e => e.stopPropagation()}
-    >
-      <SelectActionBtn onClick={onCopy} title={`Copy (${isMac ? '\u2318' : 'Ctrl'}+C)`} icon={<CopyIcon />} label="Copy" />
-      <SelectActionBtn onClick={onDelete} title="Delete" icon={<DeleteIcon />} label="Delete" danger />
-    </div>
-  );
-}
-
-function SelectActionBtn({ onClick, title, icon, label, danger }: {
-  onClick: () => void; title: string; icon: React.ReactNode; label: string; danger?: boolean;
-}) {
-  return (
-    <button
-      className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs bg-transparent border-none cursor-pointer transition-colors whitespace-nowrap
-        ${danger ? 'text-red-400 hover:bg-red-500/15' : 'text-neutral-300 hover:bg-white/10 hover:text-white'}`}
-      onClick={onClick}
-      title={title}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-function CopyIcon() {
-  return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>);
-}
-
-function DeleteIcon() {
-  return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>);
-}
-
-function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-neutral-700/60 text-neutral-300 text-[11px] font-mono leading-none border border-neutral-600/40">
-      {children}
-    </kbd>
-  );
-}
-
-function ShortcutRow({ keys, label }: { keys: string[]; label: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-1">
-      <span className="text-neutral-400 text-sm">{label}</span>
-      <span className="flex items-center gap-1">
-        {keys.map((k, i) => <Kbd key={i}>{k}</Kbd>)}
-      </span>
-    </div>
-  );
-}
-
-function Cheatsheet({ onClose }: { onClose: () => void }) {
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-      <div
-        className="relative bg-neutral-900/95 border border-neutral-700/50 rounded-2xl shadow-2xl p-6 max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto animate-slide-up"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-white text-lg font-semibold m-0">Keyboard Shortcuts</h2>
-          <button
-            className="w-7 h-7 rounded-md flex items-center justify-center text-neutral-500 hover:text-white hover:bg-white/10 transition-colors border-none bg-transparent cursor-pointer"
-            onClick={onClose}
-          >
-            &times;
-          </button>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-0">
-          {/* Tools */}
-          <div>
-            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Tools</div>
-            <ShortcutRow keys={['H']} label="Hand / Pan" />
-            <ShortcutRow keys={['P']} label="Pen" />
-            <ShortcutRow keys={['M']} label="Highlighter" />
-            <ShortcutRow keys={['E']} label="Eraser" />
-            <ShortcutRow keys={['L']} label="Line" />
-            <ShortcutRow keys={['R']} label="Rectangle" />
-            <ShortcutRow keys={['T']} label="Triangle" />
-            <ShortcutRow keys={['O']} label="Ellipse" />
-            <ShortcutRow keys={['A']} label="Axes" />
-            <ShortcutRow keys={['S']} label="Select" />
-            <ShortcutRow keys={['Esc']} label="Back to Pen" />
-          </div>
-
-          {/* Navigation */}
-          <div>
-            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Navigation</div>
-            <ShortcutRow keys={[MOD, '+']} label="Zoom in" />
-            <ShortcutRow keys={[MOD, '\u2212']} label="Zoom out" />
-            <ShortcutRow keys={[MOD, '0']} label="Reset zoom & pan" />
-            <ShortcutRow keys={['Space', 'Drag']} label="Pan canvas" />
-            <ShortcutRow keys={['Scroll']} label="Pan canvas" />
-            <ShortcutRow keys={[MOD, 'Scroll']} label="Zoom" />
-          </div>
-
-          {/* Edit */}
-          <div>
-            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Edit</div>
-            <ShortcutRow keys={[MOD, 'Z']} label="Undo" />
-            <ShortcutRow keys={[MOD, SHIFT, 'Z']} label="Redo" />
-            <ShortcutRow keys={[MOD, 'C']} label="Copy selection" />
-            <ShortcutRow keys={[MOD, 'V']} label="Paste" />
-            <ShortcutRow keys={['Del']} label="Delete selection" />
-            <ShortcutRow keys={['Shift']} label="Snap shape / lock ratio" />
-          </div>
-
-          {/* Import / Export */}
-          <div>
-            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Import / Export</div>
-            <ShortcutRow keys={[MOD, SHIFT, 'I']} label="Import file" />
-            <ShortcutRow keys={[MOD, SHIFT, 'E']} label="Export as PNG" />
-            <ShortcutRow keys={[MOD, SHIFT, 'S']} label="Export as PDF" />
-          </div>
-
-          {/* Help */}
-          <div>
-            <div className="text-neutral-500 text-[11px] uppercase tracking-wider mb-1.5 mt-2">Help</div>
-            <ShortcutRow keys={['?']} label="Toggle this cheatsheet" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PdfPageDialog({ pdf, numPages, onConfirm, onCancel }: {
-  pdf: import('pdfjs-dist').PDFDocumentProxy;
-  numPages: number;
-  onConfirm: (pages: number[]) => void;
-  onCancel: () => void;
-}) {
-  const [selected, setSelected] = useState<Set<number>>(() => new Set(Array.from({ length: numPages }, (_, i) => i + 1)));
-  const [thumbnails, setThumbnails] = useState<Map<number, string>>(new Map());
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      for (let i = 1; i <= numPages; i++) {
-        if (cancelled) break;
-        try {
-          const page = await pdf.getPage(i);
-          const viewport = page.getViewport({ scale: 0.5 });
-          const canvas = document.createElement('canvas');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          const ctx = canvas.getContext('2d')!;
-          await page.render({ canvasContext: ctx, viewport, canvas } as never).promise;
-          if (!cancelled) {
-            setThumbnails(prev => new Map(prev).set(i, canvas.toDataURL('image/png', 0.6)));
-          }
-        } catch {
-          // skip failed page
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [pdf, numPages]);
-
-  const toggle = (pageNum: number) => {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(pageNum)) next.delete(pageNum);
-      else next.add(pageNum);
-      return next;
-    });
-  };
-
-  const allSelected = selected.size === numPages;
-  const toggleAll = () => {
-    if (allSelected) setSelected(new Set());
-    else setSelected(new Set(Array.from({ length: numPages }, (_, i) => i + 1)));
-  };
-
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center" onClick={onCancel}>
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-      <div
-        className="relative bg-neutral-900/95 border border-neutral-700/50 rounded-2xl shadow-2xl p-5 max-w-xl w-full mx-4 animate-slide-up"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-white text-lg font-semibold m-0">Import PDF</h2>
-            <p className="text-neutral-400 text-sm mt-0.5 mb-0">
-              {numPages} pages — {selected.size} selected
-            </p>
-          </div>
-          <button
-            onClick={toggleAll}
-            className="text-sm text-blue-400 hover:text-blue-300 bg-transparent border-none cursor-pointer transition-colors"
-          >
-            {allSelected ? 'Deselect all' : 'Select all'}
-          </button>
-        </div>
-
-        <div className="grid grid-cols-4 sm:grid-cols-5 gap-3 max-h-[50vh] overflow-y-auto p-1 -m-1">
-          {Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => {
-            const isSelected = selected.has(pageNum);
-            const thumb = thumbnails.get(pageNum);
-            return (
-              <button
-                key={pageNum}
-                onClick={() => toggle(pageNum)}
-                className={`relative flex flex-col items-center gap-1 p-1.5 rounded-lg cursor-pointer transition-all border-2 bg-transparent
-                  ${isSelected
-                    ? 'border-blue-500 bg-blue-500/10'
-                    : 'border-transparent hover:border-neutral-600 hover:bg-white/5'}`}
-              >
-                <div className="relative w-full aspect-[3/4] rounded bg-neutral-800 overflow-hidden flex items-center justify-center">
-                  {thumb ? (
-                    <Image src={thumb} alt={`Page ${pageNum}`} className="w-full h-full object-contain" draggable={false} fill unoptimized />
-                  ) : (
-                    <div className="w-6 h-6 rounded-full border-2 border-neutral-600 border-t-neutral-400 animate-spin" />
-                  )}
-                  {isSelected && (
-                    <div className="absolute top-1 right-1 w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center shadow-md">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="20 6 9 17 4 12" />
-                      </svg>
-                    </div>
-                  )}
-                </div>
-                <span className={`text-xs tabular-nums ${isSelected ? 'text-blue-400' : 'text-neutral-500'}`}>
-                  {pageNum}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="flex justify-end gap-2 mt-4">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm text-neutral-300 bg-transparent border border-neutral-600 cursor-pointer hover:bg-white/10 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => {
-              const pages = Array.from(selected).sort((a, b) => a - b);
-              if (pages.length > 0) onConfirm(pages);
-            }}
-            disabled={selected.size === 0}
-            className="px-4 py-2 rounded-lg text-sm text-white bg-blue-600 border-none cursor-pointer hover:bg-blue-500 transition-colors disabled:opacity-40 disabled:cursor-default"
-          >
-            Import {selected.size > 0 ? `(${selected.size})` : ''}
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
