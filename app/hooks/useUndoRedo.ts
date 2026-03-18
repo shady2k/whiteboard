@@ -61,7 +61,7 @@ export function useUndoRedo({
           updatePageStrokes(cmd.pageId, s => s.filter(st => st.id !== cmd.stroke.id));
           break;
         case 'deleteStroke':
-          updatePageStrokes(cmd.pageId, s => [...s, cmd.stroke]);
+          updatePageStrokes(cmd.pageId, s => s.some(st => st.id === cmd.stroke.id) ? s : [...s, cmd.stroke]);
           break;
         case 'clearPage':
           updatePageStrokes(cmd.pageId, () => cmd.strokes);
@@ -82,23 +82,31 @@ export function useUndoRedo({
           updatePageStrokes(cmd.pageId, s => s.filter(st => !ids.has(st.id)));
           break;
         }
-        case 'deleteSelected':
-          updatePageStrokes(cmd.pageId, s => [...s, ...cmd.strokes]);
+        case 'deleteSelected': {
+          const existingIds = new Set<string>();
+          updatePageStrokes(cmd.pageId, s => {
+            existingIds.clear();
+            for (const st of s) existingIds.add(st.id);
+            const toAdd = cmd.strokes.filter(st => !existingIds.has(st.id));
+            return toAdd.length > 0 ? [...s, ...toAdd] : s;
+          });
           break;
+        }
         case 'eraseStrokes':
           // Undo: remove remaining fragments, restore originals
           updatePageStrokes(cmd.pageId, s => {
             let result = [...s];
-            for (const { strokeId, original, remaining } of cmd.erased) {
-              // Remove remaining fragments
-              const fragIds = new Set(remaining.map(r => r.id));
-              result = result.filter(st => !fragIds.has(st.id));
-              // Find where the original was (approximate: insert at the position of first fragment, or end)
-              // We'll just append since exact position isn't critical
+            const allFragIds = new Set<string>();
+            for (const { remaining } of cmd.erased) {
+              for (const r of remaining) allFragIds.add(r.id);
             }
-            // Re-add originals
+            result = result.filter(st => !allFragIds.has(st.id));
+            // Re-add originals only if not already present
+            const resultIds = new Set(result.map(st => st.id));
             for (const { original } of cmd.erased) {
-              result.push(original);
+              if (!resultIds.has(original.id)) {
+                result.push(original);
+              }
             }
             return result;
           });
@@ -120,7 +128,7 @@ export function useUndoRedo({
       switch (cmd.type) {
         case 'createStroke':
         case 'pasteImage':
-          updatePageStrokes(cmd.pageId, s => [...s, cmd.stroke]);
+          updatePageStrokes(cmd.pageId, s => s.some(st => st.id === cmd.stroke.id) ? s : [...s, cmd.stroke]);
           break;
         case 'deleteStroke':
           updatePageStrokes(cmd.pageId, s => s.filter(st => st.id !== cmd.strokeId));
@@ -139,7 +147,11 @@ export function useUndoRedo({
           updatePageStrokes(cmd.pageId, s => s.map(st => st.id === cmd.strokeId ? cmd.newStroke : st));
           break;
         case 'pasteSnippet':
-          updatePageStrokes(cmd.pageId, s => [...s, ...cmd.strokes]);
+          updatePageStrokes(cmd.pageId, s => {
+            const existingIds = new Set(s.map(st => st.id));
+            const toAdd = cmd.strokes.filter(st => !existingIds.has(st.id));
+            return toAdd.length > 0 ? [...s, ...toAdd] : s;
+          });
           break;
         case 'deleteSelected': {
           const ids = new Set(cmd.strokes.map(s => s.id));
@@ -155,9 +167,11 @@ export function useUndoRedo({
               if (idx !== -1) {
                 result.splice(idx, 1, ...remaining);
               } else {
-                // Original not found at expected id, remove it anyway
                 result = result.filter(st => st.id !== strokeId);
-                result.push(...remaining);
+                // Only add fragments not already present
+                const existingIds = new Set(result.map(st => st.id));
+                const toAdd = remaining.filter(r => !existingIds.has(r.id));
+                result.push(...toAdd);
               }
             }
             return result;

@@ -87,6 +87,7 @@ export interface Page {
   backgroundPattern: BackgroundPattern;
   backgroundColor: string;
   strokes: Stroke[];
+  revision?: number;
 }
 
 export interface Session {

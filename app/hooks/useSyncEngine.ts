@@ -18,6 +18,41 @@ import {
 } from '@/app/lib/idb';
 
 
+function strokeToCanonical(stroke: Stroke): string {
+  const { id, ...rest } = stroke as Stroke & { id: string };
+  return JSON.stringify(rest);
+}
+
+interface ServerSnapshot {
+  map: Map<string, string>;  // strokeId → canonicalJSON
+  order: string[];            // ordered stroke IDs
+}
+
+function buildSnapshot(strokes: Stroke[]): ServerSnapshot {
+  const map = new Map<string, string>();
+  const order: string[] = [];
+  for (const s of strokes) {
+    map.set(s.id, strokeToCanonical(s));
+    order.push(s.id);
+  }
+  return { map, order };
+}
+
+/** Deduplicate strokes by ID, preserving last-occurrence order */
+function dedupeStrokes(strokes: Stroke[]): Stroke[] {
+  const lastIdx = new Map<string, number>();
+  for (let i = 0; i < strokes.length; i++) lastIdx.set(strokes[i].id, i);
+  return strokes.filter((s, i) => lastIdx.get(s.id) === i);
+}
+
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 const MAX_RETRIES = 8;
 const BASE_DELAY = 500;
 const MAX_DELAY = 30_000;
@@ -149,6 +184,8 @@ export function useSyncEngine(sessionId: string) {
   // Track server revision per page for optimistic concurrency
   const pageRevisionRef = useRef<Record<string, number>>({});
   const onConflictRef = useRef<((serverStrokes: Stroke[]) => void) | null>(null);
+  // Server snapshot per page for diff computation
+  const serverSnapshotRef = useRef<Record<string, ServerSnapshot>>({});
 
   const loadLatestPage = useCallback(
     async (page: Page): Promise<Page> => {
@@ -166,6 +203,20 @@ export function useSyncEngine(sessionId: string) {
     []
   );
 
+  const handleConflict = useCallback(
+    async (latestPage: Page, body: { revision: number; strokes: Stroke[] }, actionId: string) => {
+      console.warn('Page sync conflict — accepting server version, revision:', body.revision);
+      pageRevisionRef.current[latestPage.id] = body.revision;
+      serverSnapshotRef.current[latestPage.id] = buildSnapshot(body.strokes);
+      const serverPage: Page = { ...latestPage, strokes: body.strokes };
+      await putPage(serverPage, 0);
+      await clearDirty(latestPage.id);
+      onConflictRef.current?.(body.strokes);
+      await clearPendingAction(actionId);
+    },
+    []
+  );
+
   const doPageSync = useCallback(
     async (page: Page) => {
       if (!navigator.onLine) return;
@@ -177,9 +228,9 @@ export function useSyncEngine(sessionId: string) {
       if (!assetsOk) return;
 
       // Resolve local IDs to remote IDs for server
-      const resolvedStrokes = await resolveStrokesForServer(latestPage.strokes);
+      const resolvedStrokes = dedupeStrokes(await resolveStrokesForServer(latestPage.strokes));
 
-      // Abort if any unresolved local- IDs remain — don't send them to the server
+      // Abort if any unresolved local- IDs remain
       const hasUnresolved = resolvedStrokes.some(
         (s) => s.type === 'image' && s.assetId.startsWith('local-')
       );
@@ -197,47 +248,91 @@ export function useSyncEngine(sessionId: string) {
         status: 'inflight',
       });
 
+      const snapshot = serverSnapshotRef.current[latestPage.id];
+
       try {
-        const res = await fetchWithRetry('/api/strokes', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            pageId: latestPage.id,
-            sessionId,
-            strokes: resolvedStrokes,
-            actionId,
-            expectedRevision: pageRevisionRef.current[latestPage.id],
-          }),
-        });
+        let res: Response;
+
+        if (snapshot) {
+          // Diff-based PATCH
+          const currentIds = new Set(resolvedStrokes.map(s => s.id));
+          const removed = [...snapshot.map.keys()].filter(id => !currentIds.has(id));
+          const upserted: Stroke[] = [];
+          for (const s of resolvedStrokes) {
+            const prev = snapshot.map.get(s.id);
+            const curr = strokeToCanonical(s);
+            if (prev !== curr) {
+              upserted.push(s);
+            }
+          }
+          const strokeOrder = resolvedStrokes.map(s => s.id);
+          const orderChanged = !arraysEqual(strokeOrder, snapshot.order);
+
+          // Skip sync if nothing changed (including order)
+          if (removed.length === 0 && upserted.length === 0 && !orderChanged) {
+            await clearPendingAction(actionId);
+            return;
+          }
+
+          res = await fetchWithRetry('/api/strokes', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              pageId: latestPage.id,
+              sessionId,
+              upserted,
+              removed,
+              strokeOrder,
+              actionId,
+              expectedRevision: pageRevisionRef.current[latestPage.id],
+            }),
+          });
+        } else {
+          // No snapshot — fall back to full PUT
+          res = await fetchWithRetry('/api/strokes', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              pageId: latestPage.id,
+              sessionId,
+              strokes: resolvedStrokes,
+              actionId,
+              expectedRevision: pageRevisionRef.current[latestPage.id],
+            }),
+          });
+        }
+
         if (res.status === 409) {
           const body = await res.json();
           if (body.conflict && body.strokes) {
-            // Server has newer data — hydrate locally
-            console.warn('Page sync conflict — accepting server version, revision:', body.revision);
-            pageRevisionRef.current[latestPage.id] = body.revision;
-            const serverPage: Page = { ...latestPage, strokes: body.strokes };
-            await putPage(serverPage, 0); // localUpdatedAt=0 so server wins next comparison
-            await clearDirty(latestPage.id);
-            onConflictRef.current?.(body.strokes);
+            await handleConflict(latestPage, body, actionId);
+          } else {
+            await clearPendingAction(actionId);
           }
-          await clearPendingAction(actionId);
           return;
         }
         if (!res.ok) {
           console.error('Page sync failed with status:', res.status);
+          await clearPendingAction(actionId);
+          // On 400 (e.g. invalid strokeOrder), clear snapshot to force full PUT next time
+          if (res.status === 400) {
+            delete serverSnapshotRef.current[latestPage.id];
+          }
           return;
         }
         const result = await res.json();
         if (result.revision !== undefined) {
           pageRevisionRef.current[latestPage.id] = result.revision;
         }
+        // Update snapshot to reflect what the server now has
+        serverSnapshotRef.current[latestPage.id] = buildSnapshot(resolvedStrokes);
         await clearDirty(latestPage.id);
         await clearPendingAction(actionId);
       } catch (e) {
         console.error('Page sync failed:', e);
       }
     },
-    [loadLatestPage, sessionId]
+    [loadLatestPage, sessionId, handleConflict]
   );
 
   const doBgSync = useCallback(
@@ -411,6 +506,10 @@ export function useSyncEngine(sessionId: string) {
     pageRevisionRef.current[pageId] = revision;
   }, []);
 
+  const initServerSnapshot = useCallback((pageId: string, strokes: Stroke[]) => {
+    serverSnapshotRef.current[pageId] = buildSnapshot(strokes);
+  }, []);
+
   return {
     queuePageSync,
     queueBackgroundSync,
@@ -420,5 +519,6 @@ export function useSyncEngine(sessionId: string) {
     isSyncing,
     setOnConflict,
     setPageRevision,
+    initServerSnapshot,
   };
 }

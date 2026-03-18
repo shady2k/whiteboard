@@ -31,7 +31,7 @@ const DEFAULT_PEN_CONFIGS = [
 
 export default function Whiteboard({ sessionId, initialPages, sessionName: initialName, serverSessionExists }: WhiteboardProps) {
   const { page, setPage, isOffline, notFound } = useIDBState(sessionId, initialPages, initialName, serverSessionExists);
-  const { queuePageSync, queueBackgroundSync, tryThumbnailSync, isOnline, isSyncing, setOnConflict, setPageRevision } = useSyncEngine(sessionId);
+  const { queuePageSync, queueBackgroundSync, tryThumbnailSync, isOnline, isSyncing, setOnConflict, setPageRevision, initServerSnapshot } = useSyncEngine(sessionId);
 
   // Wire up conflict handler — server wins, update React state
   useEffect(() => {
@@ -39,6 +39,19 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
       setPage(prev => ({ ...prev, strokes: serverStrokes }));
     });
   }, [setOnConflict, setPage]);
+
+  // Seed server snapshot from SSR data (server truth) on mount
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current || initialPages.length === 0) return;
+    seededRef.current = true;
+    for (const p of initialPages) {
+      initServerSnapshot(p.id, p.strokes);
+      if (p.revision !== undefined) {
+        setPageRevision(p.id, p.revision);
+      }
+    }
+  }, [initialPages, initServerSnapshot, setPageRevision]);
 
   const [sessionName] = useState(initialName);
   const [activeTool, setActiveTool] = useState<ToolType>('pen');

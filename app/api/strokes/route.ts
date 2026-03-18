@@ -58,17 +58,23 @@ export async function PUT(request: Request) {
   // Collect asset IDs referenced by old strokes before deleting
   const oldAssetIds = getPageAssetIds(pageId);
 
-  const insert = db.prepare(
-    'INSERT INTO strokes (id, page_id, type, data, z_order) VALUES (?, ?, ?, ?, ?)'
+  const upsert = db.prepare(
+    `INSERT INTO strokes (id, page_id, type, data, z_order) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET data = excluded.data, z_order = excluded.z_order, type = excluded.type`
   );
+
+  // Deduplicate strokes by ID (last occurrence wins)
+  const seen = new Map<string, number>();
+  for (let i = 0; i < strokes.length; i++) seen.set(strokes[i].id, i);
+  const deduped = [...seen.values()].sort((a: number, b: number) => a - b).map((i: number) => strokes[i]);
 
   let newRevision = 0;
   const transaction = db.transaction(() => {
     db.prepare('DELETE FROM strokes WHERE page_id = ?').run(pageId);
-    for (let i = 0; i < strokes.length; i++) {
-      const stroke = strokes[i];
+    for (let i = 0; i < deduped.length; i++) {
+      const stroke = deduped[i];
       const { id, type, ...rest } = stroke;
-      insert.run(id, pageId, type, JSON.stringify(rest), i);
+      upsert.run(id, pageId, type, JSON.stringify(rest), i);
     }
     db.prepare('UPDATE pages SET revision = revision + 1 WHERE id = ?').run(pageId);
     const updated = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number };
@@ -87,6 +93,117 @@ export async function PUT(request: Request) {
   // Update action log with result
   completeAction(actionId, result);
 
+  return NextResponse.json(result);
+}
+
+// PATCH /api/strokes — diff-based sync (upsert + remove + reorder)
+export async function PATCH(request: Request) {
+  const { pageId, sessionId, upserted, removed, strokeOrder, actionId, expectedRevision } = await request.json();
+  const db = getDb();
+
+  // Atomic dedup: claim the action ID first
+  const claimed = tryClaimAction(actionId, 'pageSync');
+  if (claimed) return claimed;
+
+  // Revision check
+  if (expectedRevision !== undefined) {
+    const page = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number } | undefined;
+    if (page && page.revision !== expectedRevision) {
+      const currentStrokes = (db.prepare(
+        'SELECT id, type, data FROM strokes WHERE page_id = ? ORDER BY z_order'
+      ).all(pageId) as Array<{ id: string; type: string; data: string }>)
+        .map(s => ({ ...JSON.parse(s.data), id: s.id, type: s.type }));
+      return NextResponse.json({
+        conflict: true,
+        revision: page.revision,
+        strokes: currentStrokes,
+      }, { status: 409 });
+    }
+  }
+
+  const now = new Date().toISOString();
+
+  // Collect asset IDs from strokes being removed (for cleanup)
+  const removedAssetIds: string[] = [];
+  if (removed && removed.length > 0) {
+    for (const strokeId of removed) {
+      const row = db.prepare('SELECT data, type FROM strokes WHERE id = ?').get(strokeId) as { data: string; type: string } | undefined;
+      if (row?.type === 'image') {
+        try {
+          const assetId = JSON.parse(row.data).assetId;
+          if (assetId) removedAssetIds.push(assetId);
+        } catch { /* ignore */ }
+      }
+    }
+  }
+
+  const upsertStmt = db.prepare(`
+    INSERT INTO strokes (id, page_id, type, data, z_order) VALUES (?, ?, ?, ?, 0)
+    ON CONFLICT(id) DO UPDATE SET data = excluded.data, type = excluded.type
+  `);
+  const deleteStmt = db.prepare('DELETE FROM strokes WHERE id = ? AND page_id = ?');
+  const updateOrder = db.prepare('UPDATE strokes SET z_order = ? WHERE id = ? AND page_id = ?');
+
+  let newRevision = 0;
+  let orderError = false;
+  const transaction = db.transaction(() => {
+    // Remove deleted strokes
+    if (removed) {
+      for (const strokeId of removed) {
+        deleteStmt.run(strokeId, pageId);
+      }
+    }
+
+    // Upsert new/changed strokes
+    if (upserted) {
+      for (const stroke of upserted) {
+        const { id, type, ...rest } = stroke;
+        upsertStmt.run(id, pageId, type, JSON.stringify(rest));
+      }
+    }
+
+    // Validate and reindex z_order from strokeOrder
+    if (strokeOrder && Array.isArray(strokeOrder)) {
+      const surviving = db.prepare(
+        'SELECT id FROM strokes WHERE page_id = ?'
+      ).all(pageId) as Array<{ id: string }>;
+      const survivingIds = new Set(surviving.map(s => s.id));
+      const orderIds = new Set<string>();
+      let valid = true;
+      for (const id of strokeOrder) {
+        if (orderIds.has(id) || !survivingIds.has(id)) { valid = false; break; }
+        orderIds.add(id);
+      }
+      if (!valid || orderIds.size !== survivingIds.size) {
+        orderError = true;
+        throw new Error('Invalid strokeOrder');
+      }
+      for (let i = 0; i < strokeOrder.length; i++) {
+        updateOrder.run(i, strokeOrder[i], pageId);
+      }
+    }
+
+    db.prepare('UPDATE pages SET revision = revision + 1 WHERE id = ?').run(pageId);
+    const updated = db.prepare('SELECT revision FROM pages WHERE id = ?').get(pageId) as { revision: number };
+    newRevision = updated.revision;
+    db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
+  });
+  try {
+    transaction();
+  } catch (e) {
+    if (orderError) {
+      return NextResponse.json({ error: 'Invalid strokeOrder' }, { status: 400 });
+    }
+    throw e;
+  }
+
+  // Clean up orphaned assets
+  if (removedAssetIds.length > 0) {
+    cleanupOrphanedAssets(removedAssetIds);
+  }
+
+  const result = { ok: true, revision: newRevision };
+  completeAction(actionId, result);
   return NextResponse.json(result);
 }
 
