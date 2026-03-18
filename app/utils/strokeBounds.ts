@@ -238,55 +238,159 @@ export interface EraserPoint {
   radius: number;
 }
 
+/** Interpolate between two points */
+function lerpPoint(a: Point, b: Point, t: number): Point {
+  return {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+    pressure: (a.pressure ?? 0.5) + ((b.pressure ?? 0.5) - (a.pressure ?? 0.5)) * t,
+  };
+}
+
+/**
+ * Compute erased intervals [t1,t2] on segment a→b for all eraser circles.
+ * Returns merged, sorted intervals in parameter space [0,1].
+ */
+function computeErasedIntervals(
+  a: Point, b: Point, eraserPts: EraserPoint[],
+): [number, number][] {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const segLenSq = dx * dx + dy * dy;
+  if (segLenSq < 1e-10) return [];
+
+  const intervals: [number, number][] = [];
+  for (const { point: ep, radius: er } of eraserPts) {
+    const fx = a.x - ep.x;
+    const fy = a.y - ep.y;
+    const aa = segLenSq;
+    const bb = 2 * (fx * dx + fy * dy);
+    const cc = fx * fx + fy * fy - er * er;
+    const disc = bb * bb - 4 * aa * cc;
+    if (disc <= 0) continue; // skip tangent (disc==0) and miss (disc<0)
+    const sqrtDisc = Math.sqrt(disc);
+    const t1 = (-bb - sqrtDisc) / (2 * aa);
+    const t2 = (-bb + sqrtDisc) / (2 * aa);
+    if (t2 < 0 || t1 > 1) continue;
+    const clamped1 = Math.max(0, t1);
+    const clamped2 = Math.min(1, t2);
+    if (clamped2 - clamped1 < 1e-6) continue; // skip zero-width intervals
+    intervals.push([clamped1, clamped2]);
+  }
+  if (intervals.length === 0) return [];
+
+  // Merge overlapping intervals
+  intervals.sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [intervals[0]];
+  for (let i = 1; i < intervals.length; i++) {
+    const last = merged[merged.length - 1];
+    if (intervals[i][0] <= last[1]) {
+      last[1] = Math.max(last[1], intervals[i][1]);
+    } else {
+      merged.push(intervals[i]);
+    }
+  }
+  return merged;
+}
+
 /**
  * Compute erase results for a single stroke against a set of eraser points.
+ * Uses segment-based clipping for precise eraser boundaries.
  * Returns null if no hit. Returns { hit: true, remaining: Stroke[] } otherwise.
- * For freehand/marker strokes, remaining contains the surviving fragments.
- * For shapes/images, remaining is empty (whole stroke deleted).
  */
 export function computeEraseResult(
   stroke: Stroke,
   eraserPts: EraserPoint[],
+  preview = false,
 ): { hit: true; remaining: Stroke[] } | null {
   if ((stroke.type === 'freehand' || stroke.type === 'marker') && stroke.points.length > 0) {
-    const erasedIndices = new Set<number>();
-    for (let i = 0; i < stroke.points.length; i++) {
-      const p = stroke.points[i];
+    const pts = stroke.points;
+    // Dot visual radius (rendered as a filled circle for single-point strokes
+    // and very short strokes)
+    const dotRadius = stroke.style.baseWidth / 2;
+
+    // Check if all points are clustered (dot / tap) — treat as a single dot
+    if (pts.length === 1 || pts.every(p =>
+      (p.x - pts[0].x) ** 2 + (p.y - pts[0].y) ** 2 < dotRadius * dotRadius
+    )) {
+      const p = pts[0];
+      const hitRadius = dotRadius; // visual radius of the dot
       for (const { point: ep, radius: er } of eraserPts) {
-        const r2 = er * er;
-        const dx = p.x - ep.x;
-        const dy = p.y - ep.y;
-        if (dx * dx + dy * dy < r2) {
-          erasedIndices.add(i);
-          break;
-        }
-        if (i > 0 && distPointToSegment(ep, stroke.points[i - 1], p) < er) {
-          erasedIndices.add(i);
-          break;
-        }
-        if (i < stroke.points.length - 1 && distPointToSegment(ep, p, stroke.points[i + 1]) < er) {
-          erasedIndices.add(i);
-          break;
+        const dist = Math.sqrt((p.x - ep.x) ** 2 + (p.y - ep.y) ** 2);
+        if (dist < er + hitRadius) {
+          return { hit: true, remaining: [] };
         }
       }
+      return null;
     }
-    if (erasedIndices.size === 0) return null;
-    const segments: Point[][] = [];
-    let seg: Point[] = [];
-    for (let i = 0; i < stroke.points.length; i++) {
-      if (!erasedIndices.has(i)) {
-        seg.push(stroke.points[i]);
+
+    // Collect all erased intervals in global parameter space [0, N-1]
+    const erasedGlobal: [number, number][] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const segErased = computeErasedIntervals(pts[i], pts[i + 1], eraserPts);
+      for (const [t1, t2] of segErased) {
+        erasedGlobal.push([i + t1, i + t2]);
+      }
+    }
+    if (erasedGlobal.length === 0) return null;
+
+    // Merge erased intervals globally
+    erasedGlobal.sort((a, b) => a[0] - b[0]);
+    const merged: [number, number][] = [erasedGlobal[0]];
+    for (let i = 1; i < erasedGlobal.length; i++) {
+      const last = merged[merged.length - 1];
+      if (erasedGlobal[i][0] <= last[1] + 1e-6) {
+        last[1] = Math.max(last[1], erasedGlobal[i][1]);
       } else {
-        if (seg.length >= 2) segments.push(seg);
-        seg = [];
+        merged.push(erasedGlobal[i]);
       }
     }
-    if (seg.length >= 2) segments.push(seg);
-    const remaining = segments.map((pts) => ({
+
+    // Compute surviving intervals (complement of merged within [0, N-1])
+    const N = pts.length - 1;
+    const surviving: [number, number][] = [];
+    let prev = 0;
+    for (const [t1, t2] of merged) {
+      if (t1 > prev + 1e-6) surviving.push([prev, t1]);
+      prev = Math.max(prev, t2);
+    }
+    if (prev < N - 1e-6) surviving.push([prev, N]);
+
+    // Sample a point at global parameter t
+    const sample = (t: number): Point => {
+      const i = Math.min(Math.floor(t), pts.length - 2);
+      const frac = t - i;
+      if (frac < 1e-6) return pts[i];
+      if (frac > 1 - 1e-6) return pts[i + 1];
+      return lerpPoint(pts[i], pts[i + 1], frac);
+    };
+
+    // Convert surviving intervals to point arrays
+    const fragments: Point[][] = [];
+    for (const [start, end] of surviving) {
+      if (end - start < 1e-6) continue;
+      const frag: Point[] = [sample(start)];
+      // Add all original points strictly between start and end
+      const iStart = Math.ceil(start + 1e-6);
+      const iEnd = Math.floor(end - 1e-6);
+      for (let j = iStart; j <= iEnd; j++) {
+        frag.push(pts[j]);
+      }
+      // Add endpoint if distinct from last point
+      const endPt = sample(end);
+      const last = frag[frag.length - 1];
+      if (Math.abs(endPt.x - last.x) > 1e-4 || Math.abs(endPt.y - last.y) > 1e-4) {
+        frag.push(endPt);
+      }
+      if (frag.length >= 2) fragments.push(frag);
+    }
+
+    const remaining = fragments.map((fragPts) => ({
       type: stroke.type,
-      id: uuidv4(),
-      points: pts,
-      style: { ...stroke.style },
+      id: preview ? stroke.id : uuidv4(),
+      points: fragPts,
+      style: stroke.style,
+      ...((stroke as FreehandStroke).geometric ? { geometric: true } : {}),
     } as Stroke));
     return { hit: true, remaining };
   }

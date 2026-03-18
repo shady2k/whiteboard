@@ -516,8 +516,8 @@ export default function SessionList() {
 
       {/* Undo toast */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[70] animate-slide-up">
-          <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-neutral-800/95 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/50">
+        <div className="fixed bottom-6 inset-x-0 flex justify-center z-[70] pointer-events-none animate-slide-up">
+          <div className="pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-xl bg-neutral-800/95 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/50">
             <span className="text-sm text-neutral-200">{toast.message}</span>
             <button
               onClick={undoDelete}
@@ -531,8 +531,8 @@ export default function SessionList() {
 
       <style jsx global>{`
         @keyframes slide-up {
-          from { opacity: 0; transform: translate(-50%, 16px); }
-          to { opacity: 1; transform: translate(-50%, 0); }
+          from { opacity: 0; transform: translateY(16px); }
+          to { opacity: 1; transform: translateY(0); }
         }
         @keyframes fade-in {
           from { opacity: 0; }

@@ -90,6 +90,7 @@ export default function Canvas({
   const lastEraserTimeRef = useRef(0);
   const lastEraserPosRef = useRef<{ x: number; y: number } | null>(null);
   const eraserVelocityRef = useRef(0); // smoothed velocity in canvas-space px/ms
+  const eraserRadiusRef = useRef<number | null>(null); // smoothed eraser radius
   const onImageTransformRef = useLatestRef(onImageTransform);
   const onToolChangeRef = useLatestRef(onToolChange);
   const onZoomChangeRef = useLatestRef(onZoomChange);
@@ -478,6 +479,7 @@ export default function Canvas({
         lastEraserTimeRef.current = performance.now();
         lastEraserPosRef.current = { x: point.x, y: point.y };
         eraserVelocityRef.current = 0;
+        eraserRadiusRef.current = null;
       } else {
         startPointRef.current = point;
         currentPointRef.current = point;
@@ -667,12 +669,15 @@ export default function Canvas({
           const dist = Math.sqrt(dx * dx + dy * dy);
           const dt = Math.max(1, now - lastEraserTimeRef.current);
           const velocity = dist / dt; // canvas-space px per ms
-          // Smooth the velocity
-          eraserVelocityRef.current = eraserVelocityRef.current * 0.6 + velocity * 0.4;
+          // Smooth the velocity with heavy low-pass filter
+          eraserVelocityRef.current = eraserVelocityRef.current * 0.85 + velocity * 0.15;
           // Map velocity to radius: ramp up between 0.15 and 1.5 px/ms
           const t = Math.min(1, Math.max(0, (eraserVelocityRef.current - 0.15) / 1.35));
-          currentRadius = baseRadius + (maxRadius - baseRadius) * t * t;
+          const targetRadius = baseRadius + (maxRadius - baseRadius) * t;
+          // Smooth the radius itself for extra stability
+          currentRadius = (eraserRadiusRef.current ?? baseRadius) * 0.8 + targetRadius * 0.2;
         }
+        eraserRadiusRef.current = currentRadius;
         lastEraserTimeRef.current = now;
         lastEraserPosRef.current = { x: point.x, y: point.y };
         eraserPointsRef.current.push({ point, radius: currentRadius });
@@ -689,7 +694,7 @@ export default function Canvas({
             inkCtx.translate(panX, panY);
             inkCtx.scale(s, s);
             for (const stroke of strokesRef.current) {
-              const result = computeEraseResult(stroke, eraserPts);
+              const result = computeEraseResult(stroke, eraserPts, true);
               if (result === null) {
                 renderStroke(inkCtx, stroke);
               } else {
