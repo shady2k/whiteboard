@@ -173,10 +173,8 @@ export function partialEraseStroke(
     const dy = (eraserPos.y - stroke.center.y) / stroke.radiusY;
     const d = Math.sqrt(dx * dx + dy * dy);
     if (Math.abs(d - 1) < eraserRadius / Math.min(stroke.radiusX, stroke.radiusY)) return [];
-  } else if (stroke.type === 'image') {
-    const { x, y, width, height } = stroke;
-    if (eraserPos.x >= x && eraserPos.x <= x + width && eraserPos.y >= y && eraserPos.y <= y + height) return [];
   }
+  // Images are intentionally excluded — eraser should not affect them
 
   return null; // No hit
 }
@@ -304,6 +302,9 @@ export function computeEraseResult(
   eraserPts: EraserPoint[],
   preview = false,
 ): { hit: true; remaining: Stroke[] } | null {
+  // Images/PDFs should not be affected by the eraser
+  if (stroke.type === 'image') return null;
+
   if ((stroke.type === 'freehand' || stroke.type === 'marker') && stroke.points.length > 0) {
     const pts = stroke.points;
     // Dot visual radius (rendered as a filled circle for single-point strokes

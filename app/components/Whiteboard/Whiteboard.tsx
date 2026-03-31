@@ -74,26 +74,32 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     const config = penConfigs.find(p => p.color === activePenColor);
     return config ? { color: config.color, baseWidth: config.baseWidth } : { color: '#000000', baseWidth: 4 };
   }, [penConfigs, activePenColor, activeTool, markerStyle]);
-  const [zoom, setZoom] = useState(() => {
-    if (typeof sessionStorage === 'undefined') return 1;
-    const saved = sessionStorage.getItem(`wb-zoom-${sessionId}`);
-    return saved ? Number(saved) : 1;
-  });
-  const [panOffset, setPanOffset] = useState(() => {
-    if (typeof sessionStorage === 'undefined') return { x: 0, y: 0 };
-    const saved = sessionStorage.getItem(`wb-pan-${sessionId}`);
-    if (!saved) return { x: 0, y: 0 };
-    try { return JSON.parse(saved); } catch { return { x: 0, y: 0 }; }
-  });
+  type Viewport = { zoom: number; panOffset: { x: number; y: number } };
+  const [viewport, setViewport] = useState<Viewport>({ zoom: 1, panOffset: { x: 0, y: 0 } });
+  const { zoom, panOffset } = viewport;
+  const setZoom = useCallback((v: number) => setViewport(vp => ({ ...vp, zoom: v })), []);
+  const setPanOffset = useCallback((v: { x: number; y: number }) => setViewport(vp => ({ ...vp, panOffset: v })), []);
   const [showCheatsheet, setShowCheatsheet] = useState(false);
+
+  // Restore viewport from sessionStorage after hydration
+  const viewportRestoredForRef = useRef<string | null>(null);
+  useEffect(() => {
+    viewportRestoredForRef.current = null; // reset before restoring new session
+    const savedZoom = sessionStorage.getItem(`wb-zoom-${sessionId}`);
+    const savedPan = sessionStorage.getItem(`wb-pan-${sessionId}`);
+    const z = savedZoom ? Number(savedZoom) : 1;
+    let p = { x: 0, y: 0 };
+    if (savedPan) try { p = JSON.parse(savedPan); } catch {}
+    setViewport({ zoom: z, panOffset: p });
+    viewportRestoredForRef.current = sessionId;
+  }, [sessionId]);
 
   // Persist viewport to sessionStorage so it survives navigation
   useEffect(() => {
+    if (viewportRestoredForRef.current !== sessionId) return;
     sessionStorage.setItem(`wb-zoom-${sessionId}`, String(zoom));
-  }, [sessionId, zoom]);
-  useEffect(() => {
     sessionStorage.setItem(`wb-pan-${sessionId}`, JSON.stringify(panOffset));
-  }, [sessionId, panOffset]);
+  }, [sessionId, zoom, panOffset]);
 
   const strokes = useMemo(() => page?.strokes ?? [], [page?.strokes]);
 
@@ -275,22 +281,25 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
 
   // Zoom controls
   const zoomIn = useCallback(() => {
-    setZoom(z => {
-      const nextStep = ZOOM_STEPS.find(s => s > z + 0.01);
-      return nextStep ?? z;
+    setViewport(vp => {
+      const next = ZOOM_STEPS.find(s => s > vp.zoom + 0.01);
+      if (!next) return vp;
+      const ratio = next / vp.zoom;
+      return { zoom: next, panOffset: { x: vp.panOffset.x * ratio, y: vp.panOffset.y * ratio } };
     });
   }, []);
 
   const zoomOut = useCallback(() => {
-    setZoom(z => {
-      const prevStep = [...ZOOM_STEPS].reverse().find(s => s < z - 0.01);
-      return prevStep ?? z;
+    setViewport(vp => {
+      const prev = [...ZOOM_STEPS].reverse().find(s => s < vp.zoom - 0.01);
+      if (!prev) return vp;
+      const ratio = prev / vp.zoom;
+      return { zoom: prev, panOffset: { x: vp.panOffset.x * ratio, y: vp.panOffset.y * ratio } };
     });
   }, []);
 
   const zoomReset = useCallback(() => {
-    setZoom(1);
-    setPanOffset({ x: 0, y: 0 });
+    setViewport({ zoom: 1, panOffset: { x: 0, y: 0 } });
   }, []);
 
   const [pendingSelection, setPendingSelection] = useState<{ strokes: Stroke[]; bounds: { x: number; y: number; width: number; height: number } } | null>(null);

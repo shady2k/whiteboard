@@ -6,6 +6,25 @@ const loading = new Set<string>();
 const callbacks = new Map<string, (() => void)[]>();
 const blobUrls = new Map<string, string>();
 
+// Concurrency limit for network fetches
+const MAX_CONCURRENT_FETCHES = 4;
+let activeFetches = 0;
+const fetchQueue: (() => void)[] = [];
+
+function enqueueFetch(fn: () => Promise<void>): void {
+  const run = () => {
+    activeFetches++;
+    fn().finally(() => {
+      activeFetches--;
+      while (activeFetches < MAX_CONCURRENT_FETCHES && fetchQueue.length > 0) {
+        fetchQueue.shift()!();
+      }
+    });
+  };
+  if (activeFetches < MAX_CONCURRENT_FETCHES) run();
+  else fetchQueue.push(run);
+}
+
 function evictIfNeeded() {
   if (cache.size <= MAX_CACHE_SIZE) return;
   const keysToRemove = Array.from(cache.keys()).slice(0, cache.size - MAX_CACHE_SIZE);
@@ -88,21 +107,44 @@ async function loadFromIDBThenNetwork(assetId: string) {
     }
   }
 
-  // Fetch from server
-  setImageSrc(assetId, `/api/assets?id=${fetchId}`);
+  // Fetch from server via concurrency-limited queue
+  enqueueFetch(() => loadFromNetwork(assetId, fetchId));
+}
+
+async function loadFromNetwork(assetId: string, fetchId: string): Promise<void> {
+  const url = `/api/assets?id=${fetchId}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      finishLoading(assetId, null);
+      return;
+    }
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    blobUrls.set(assetId, objUrl);
+
+    // Load image from blob URL (no second fetch needed)
+    setImageSrc(assetId, objUrl);
+
+    // Cache to IDB directly from the blob we already have
+    cacheImageBlobToIDB(assetId, blob).catch(() => {});
+  } catch {
+    finishLoading(assetId, null);
+  }
 }
 
 function setImageSrc(assetId: string, src: string) {
   const img = new Image();
   img.onload = () => {
     finishLoading(assetId, img);
-
-    // Cache blob in IDB for offline use (only for server-fetched images)
-    if (!src.startsWith('blob:') && !assetId.startsWith('local-')) {
-      cacheImageBlobToIDB(assetId, src).catch(() => {});
-    }
   };
   img.onerror = () => {
+    // Revoke blob URL on failure to prevent memory leaks
+    const objUrl = blobUrls.get(assetId);
+    if (objUrl) {
+      URL.revokeObjectURL(objUrl);
+      blobUrls.delete(assetId);
+    }
     finishLoading(assetId, null);
   };
   img.src = src;
@@ -122,12 +164,9 @@ function finishLoading(assetId: string, img: HTMLImageElement | null) {
   for (const cb of cbs) cb();
 }
 
-async function cacheImageBlobToIDB(assetId: string, url: string) {
+async function cacheImageBlobToIDB(assetId: string, blob: Blob) {
   try {
     const { putAsset } = await import('@/app/lib/idb');
-    const res = await fetch(url);
-    if (!res.ok) return;
-    const blob = await res.blob();
     await putAsset({
       id: assetId,
       blob,

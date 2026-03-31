@@ -9,7 +9,7 @@ import { drawLinePreview, drawRectPreview, drawEllipsePreview, drawTrianglePrevi
 import { drawBackground } from '@/app/utils/drawGrid';
 import { snapLineEnd, snapRectEnd, snapEllipseEnd } from '@/app/utils/snapShape';
 import { getCachedImage } from '@/app/utils/imageCache';
-import { strokeIntersectsRect, findStrokeAtPoint as findStrokeAtPointUtil, computeEraseResult } from '@/app/utils/strokeBounds';
+import { strokeIntersectsRect, findStrokeAtPoint as findStrokeAtPointUtil, computeEraseResult, getStrokeBounds } from '@/app/utils/strokeBounds';
 import { offsetStroke } from '@/app/utils/strokeTransform';
 import { useImageDrag } from '@/app/hooks/useImageDrag';
 import { simplifyPoints } from '@/app/utils/simplifyPoints';
@@ -92,6 +92,8 @@ export default function Canvas({
   const lastEraserPosRef = useRef<{ x: number; y: number } | null>(null);
   const eraserVelocityRef = useRef(0); // smoothed velocity in canvas-space px/ms
   const eraserRadiusRef = useRef<number | null>(null); // smoothed eraser radius
+  // Pen cursor hover state — dot drawn on preview canvas
+  const penCursorRafRef = useRef(0);
   const onImageTransformRef = useLatestRef(onImageTransform);
   const onToolChangeRef = useLatestRef(onToolChange);
   const onZoomChangeRef = useLatestRef(onZoomChange);
@@ -155,6 +157,7 @@ export default function Canvas({
   }, [getCtx, getViewportSize, getTransform]);
 
   const redrawInkRef = useRef<() => void>(null);
+  const scheduleRedrawRef = useRef<(bg: boolean, ink: boolean) => void>(null);
   const redrawInk = useCallback(() => {
     const ctx = getCtx(inkCanvasRef.current);
     if (!ctx) return;
@@ -164,7 +167,14 @@ export default function Canvas({
     ctx.save();
     ctx.translate(panX, panY);
     ctx.scale(s, s);
-    renderAllStrokes(ctx, strokesRef.current, () => redrawInkRef.current?.(), draggingImageIdRef.current ?? undefined);
+    // Visible rect in canvas coordinates for viewport culling
+    const visibleRect = {
+      minX: -panX / s,
+      minY: -panY / s,
+      maxX: (-panX + w) / s,
+      maxY: (-panY + h) / s,
+    };
+    renderAllStrokes(ctx, strokesRef.current, () => scheduleRedrawRef.current?.(false, true), draggingImageIdRef.current ?? undefined, visibleRect);
     ctx.restore();
   }, [getCtx, getViewportSize, getTransform]);
   useEffect(() => { redrawInkRef.current = redrawInk; }, [redrawInk]);
@@ -183,7 +193,7 @@ export default function Canvas({
     ctx.save();
     ctx.translate(panX, panY);
     ctx.scale(s, s);
-    renderStroke(ctx, stroke, () => redrawInkRef.current?.());
+    renderStroke(ctx, stroke, () => scheduleRedrawRef.current?.(false, true));
     ctx.restore();
   }, [getCtx, getTransform]);
 
@@ -236,9 +246,45 @@ export default function Canvas({
       if (needInk) redrawInk();
     });
   }, [redrawBackground, redrawInk]);
+  useEffect(() => { scheduleRedrawRef.current = scheduleRedraw; }, [scheduleRedraw]);
+
+  // Cached content bounds — recomputed when strokes change, used for pan clamping
+  const contentBoundsRef = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
+  useEffect(() => {
+    const allStrokes = strokesRef.current;
+    if (allStrokes.length === 0) {
+      contentBoundsRef.current = null;
+      return;
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of allStrokes) {
+      const b = getStrokeBounds(s);
+      if (b.minX < minX) minX = b.minX;
+      if (b.minY < minY) minY = b.minY;
+      if (b.maxX > maxX) maxX = b.maxX;
+      if (b.maxY > maxY) maxY = b.maxY;
+    }
+    contentBoundsRef.current = { minX, minY, maxX, maxY };
+  }, [strokes]);
 
   // Direct viewport update — bypasses React render, draws immediately via rAF
   const updateViewport = useCallback((nextScale: number, nextPan: { x: number; y: number }) => {
+    // Clamp pan so user can't scroll too far from content
+    const bounds = contentBoundsRef.current;
+    if (bounds) {
+      const { minX, minY, maxX, maxY } = bounds;
+      const { w, h } = getViewportSize();
+      const margin = Math.max(w, h) / nextScale;
+      const panMinX = (w / 2 - (maxX + margin)) * nextScale;
+      const panMaxX = (w / 2 - (minX - margin)) * nextScale;
+      const panMinY = (h / 2 - (maxY + margin)) * nextScale;
+      const panMaxY = (h / 2 - (minY - margin)) * nextScale;
+      nextPan = {
+        x: Math.max(panMinX, Math.min(panMaxX, nextPan.x)),
+        y: Math.max(panMinY, Math.min(panMaxY, nextPan.y)),
+      };
+    }
+
     viewportRef.current = { scale: nextScale, panOffset: nextPan };
     scaleRef.current = nextScale;
     panOffsetRef.current = nextPan;
@@ -320,7 +366,12 @@ export default function Canvas({
       if (e.ctrlKey || e.metaKey) {
         const delta = -e.deltaY * 0.01;
         const newZoom = Math.max(0.25, Math.min(4, vp.scale + delta));
-        updateViewport(newZoom, vp.panOffset);
+        // Adjust pan so screen center stays fixed
+        const ratio = newZoom / vp.scale;
+        updateViewport(newZoom, {
+          x: vp.panOffset.x * ratio,
+          y: vp.panOffset.y * ratio,
+        });
       } else {
         updateViewport(vp.scale, {
           x: vp.panOffset.x - e.deltaX,
@@ -671,12 +722,12 @@ export default function Canvas({
           const dt = Math.max(1, now - lastEraserTimeRef.current);
           const velocity = dist / dt; // canvas-space px per ms
           // Smooth the velocity with heavy low-pass filter
-          eraserVelocityRef.current = eraserVelocityRef.current * 0.85 + velocity * 0.15;
-          // Map velocity to radius: ramp up between 0.15 and 1.5 px/ms
-          const t = Math.min(1, Math.max(0, (eraserVelocityRef.current - 0.15) / 1.35));
+          eraserVelocityRef.current = eraserVelocityRef.current * 0.92 + velocity * 0.08;
+          // Map velocity to radius: ramp up between 0.2 and 2.0 px/ms
+          const t = Math.min(1, Math.max(0, (eraserVelocityRef.current - 0.2) / 1.8));
           const targetRadius = baseRadius + (maxRadius - baseRadius) * t;
           // Smooth the radius itself for extra stability
-          currentRadius = (eraserRadiusRef.current ?? baseRadius) * 0.8 + targetRadius * 0.2;
+          currentRadius = (eraserRadiusRef.current ?? baseRadius) * 0.9 + targetRadius * 0.1;
         }
         eraserRadiusRef.current = currentRadius;
         lastEraserTimeRef.current = now;
@@ -918,8 +969,67 @@ export default function Canvas({
   }, [getPoint, getCtx, getViewportSize, getTransform, clearPreview, drawCommittedStrokeToInk, findStrokeAtPoint, findImageAtPoint, drawImageSelection, redrawBackground, redrawInk, updateViewport, flushViewportCommit]);
 
 
+  // Pen/shape cursor: draw a velocity-responsive dot on hover
+  const isDrawingTool = activeTool === 'pen' || activeTool === 'marker' || activeTool === 'line' || activeTool === 'rect' || activeTool === 'triangle' || activeTool === 'ellipse' || activeTool === 'axes';
+  useEffect(() => {
+    const canvas = previewCanvasRef.current;
+    if (!canvas || !isDrawingTool) return;
+
+    const onHoverMove = (e: PointerEvent) => {
+      if (isDrawingRef.current) return;
+      const sx = e.clientX;
+      const sy = e.clientY;
+      const r = 3;
+
+      cancelAnimationFrame(penCursorRafRef.current);
+      penCursorRafRef.current = requestAnimationFrame(() => {
+        clearPreview();
+        const ctx = getCtx(previewCanvasRef.current);
+        if (!ctx) return;
+        const color = strokeStyleRef.current.color;
+        // Small dot
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.6;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        // Crosshair lines
+        const cross = r + 4;
+        ctx.beginPath();
+        ctx.moveTo(sx - cross, sy);
+        ctx.lineTo(sx - r - 1, sy);
+        ctx.moveTo(sx + r + 1, sy);
+        ctx.lineTo(sx + cross, sy);
+        ctx.moveTo(sx, sy - cross);
+        ctx.lineTo(sx, sy - r - 1);
+        ctx.moveTo(sx, sy + r + 1);
+        ctx.lineTo(sx, sy + cross);
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.5;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      });
+    };
+
+    const onHoverLeave = () => {
+      cancelAnimationFrame(penCursorRafRef.current);
+      clearPreview();
+    };
+
+    canvas.addEventListener('pointermove', onHoverMove);
+    canvas.addEventListener('pointerleave', onHoverLeave);
+    return () => {
+      canvas.removeEventListener('pointermove', onHoverMove);
+      canvas.removeEventListener('pointerleave', onHoverLeave);
+      cancelAnimationFrame(penCursorRafRef.current);
+      clearPreview();
+    };
+  }, [isDrawingTool, getCtx, clearPreview]);
+
   const eraserCursorSvg = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Ccircle cx='11' cy='11' r='9.5' fill='none' stroke='black' stroke-width='2'/%3E%3Ccircle cx='11' cy='11' r='9.5' fill='none' stroke='white' stroke-width='1'/%3E%3C/svg%3E") 11 11, auto`;
-  const cursorClass = activeTool === 'hand' ? 'cursor-grab' : activeTool === 'select' && pastePreview ? 'cursor-copy' : activeTool === 'eraser' ? '' : 'cursor-crosshair';
+  const cursorClass = activeTool === 'hand' ? 'cursor-grab' : activeTool === 'select' && pastePreview ? 'cursor-copy' : activeTool === 'eraser' || isDrawingTool ? 'cursor-none' : 'cursor-crosshair';
   const cursorStyle = activeTool === 'eraser' ? { cursor: eraserCursorSvg } : undefined;
 
   return (

@@ -2,6 +2,18 @@ import { Stroke, ImageStroke } from '@/app/types';
 import { drawFreehandStroke, drawMarkerStroke } from './drawStroke';
 import { drawLineStroke, drawRectStroke, drawTriangleStroke, drawEllipseStroke, drawAxesStroke } from './drawShape';
 import { getCachedImage, loadImage } from './imageCache';
+import { getStrokeBounds, type BoundingBox } from './strokeBounds';
+
+// Cache per-stroke bounds to avoid recomputing on every redraw (strokes are immutable objects)
+const boundsCache = new WeakMap<Stroke, BoundingBox>();
+function getCachedBounds(stroke: Stroke): BoundingBox {
+  let b = boundsCache.get(stroke);
+  if (!b) {
+    b = getStrokeBounds(stroke);
+    boundsCache.set(stroke, b);
+  }
+  return b;
+}
 
 export function renderStroke(
   ctx: CanvasRenderingContext2D,
@@ -57,15 +69,30 @@ function drawImageStroke(
   }
 }
 
+function boundsOverlap(a: BoundingBox, b: BoundingBox): boolean {
+  return a.minX <= b.maxX && a.maxX >= b.minX && a.minY <= b.maxY && a.maxY >= b.minY;
+}
+
 export function renderAllStrokes(
   ctx: CanvasRenderingContext2D,
   strokes: Stroke[],
   onImageLoad?: () => void,
-  skipStrokeId?: string
+  skipStrokeId?: string,
+  visibleRect?: BoundingBox
 ): void {
-  // Render strokes in their natural z-order (array order matches DB z_order)
   for (const stroke of strokes) {
     if (skipStrokeId && stroke.id === skipStrokeId) continue;
+    // Viewport culling: skip strokes entirely outside the visible area
+    if (visibleRect) {
+      const bounds = { ...getCachedBounds(stroke) };
+      // Add padding for stroke width (freehand strokes extend beyond their points)
+      const pad = 'style' in stroke && stroke.style ? (stroke.style as { baseWidth?: number }).baseWidth ?? 0 : 0;
+      bounds.minX -= pad;
+      bounds.minY -= pad;
+      bounds.maxX += pad;
+      bounds.maxY += pad;
+      if (!boundsOverlap(bounds, visibleRect)) continue;
+    }
     renderStroke(ctx, stroke, onImageLoad);
   }
 }

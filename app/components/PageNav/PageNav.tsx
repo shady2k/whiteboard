@@ -36,6 +36,15 @@ export default function PageNav({
   const thumbWRef = useRef(Math.round(THUMB_H * 16 / 9));
   const renderThumbRef = useRef<() => void>(null);
 
+  const thumbRafRef = useRef(0);
+  const scheduleThumbRender = useCallback(() => {
+    if (thumbRafRef.current) return;
+    thumbRafRef.current = requestAnimationFrame(() => {
+      thumbRafRef.current = 0;
+      renderThumbRef.current?.();
+    });
+  }, []);
+
   const renderThumb = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -54,9 +63,9 @@ export default function PageNav({
     ctx.save();
     ctx.scale(tw / vw, THUMB_H / vh);
     drawBackground(ctx, vw, vh, backgroundPattern, backgroundColor);
-    renderAllStrokes(ctx, strokes, () => renderThumbRef.current?.());
+    renderAllStrokes(ctx, strokes, scheduleThumbRender);
     ctx.restore();
-  }, [strokes, backgroundPattern, backgroundColor]);
+  }, [strokes, backgroundPattern, backgroundColor, scheduleThumbRender]);
   useEffect(() => { renderThumbRef.current = renderThumb; }, [renderThumb]);
 
   useEffect(() => {
@@ -66,7 +75,10 @@ export default function PageNav({
   useEffect(() => {
     const onResize = () => renderThumb();
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      if (thumbRafRef.current) cancelAnimationFrame(thumbRafRef.current);
+    };
   }, [renderThumb]);
 
   return (
