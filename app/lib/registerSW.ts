@@ -12,6 +12,17 @@ export function registerServiceWorker() {
 
   const reloadPage = () => {
     if (hasReloaded || !shouldReloadOnControllerChange) return;
+    // Defer reload until the tab is backgrounded to avoid interrupting active sessions
+    if (document.visibilityState === 'visible') {
+      document.addEventListener('visibilitychange', function handler() {
+        document.removeEventListener('visibilitychange', handler);
+        if (!hasReloaded) {
+          hasReloaded = true;
+          window.location.reload();
+        }
+      });
+      return;
+    }
     hasReloaded = true;
     window.location.reload();
   };

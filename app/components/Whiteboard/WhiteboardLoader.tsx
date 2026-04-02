@@ -2,6 +2,7 @@
 
 import type { Page } from '@/app/types';
 import Whiteboard from './Whiteboard';
+import ErrorBoundary from '@/app/components/ErrorBoundary';
 
 interface WhiteboardLoaderProps {
   sessionId: string;
@@ -12,11 +13,13 @@ interface WhiteboardLoaderProps {
 
 export default function WhiteboardLoader({ sessionId, initialPages, sessionName, serverSessionExists }: WhiteboardLoaderProps) {
   return (
-    <Whiteboard
-      sessionId={sessionId}
-      initialPages={initialPages}
-      sessionName={sessionName}
-      serverSessionExists={serverSessionExists}
-    />
+    <ErrorBoundary>
+      <Whiteboard
+        sessionId={sessionId}
+        initialPages={initialPages}
+        sessionName={sessionName}
+        serverSessionExists={serverSessionExists}
+      />
+    </ErrorBoundary>
   );
 }

@@ -11,6 +11,12 @@ interface UseUndoRedoParams {
   pageRef: React.RefObject<Page | null>;
 }
 
+const MAX_UNDO_HISTORY = 150;
+
+function capStack(stack: Command[]): Command[] {
+  return stack.length > MAX_UNDO_HISTORY ? stack.slice(stack.length - MAX_UNDO_HISTORY) : stack;
+}
+
 export function useUndoRedo({
   sessionId,
   updatePageStrokes,
@@ -26,8 +32,8 @@ export function useUndoRedo({
   useEffect(() => {
     loadUndoHistory(sessionId).then((history) => {
       if (history) {
-        setUndoStack(history.undoStack);
-        setRedoStack(history.redoStack);
+        setUndoStack(capStack(history.undoStack));
+        setRedoStack(capStack(history.redoStack));
       }
     }).catch(() => {});
   }, [sessionId]);
@@ -45,7 +51,7 @@ export function useUndoRedo({
   }, [sessionId, undoStack, redoStack]);
 
   const pushCommand = useCallback((cmd: Command) => {
-    setUndoStack(prev => [...prev, cmd]);
+    setUndoStack(prev => capStack([...prev, cmd]));
     setRedoStack([]);
   }, []);
 
@@ -113,7 +119,7 @@ export function useUndoRedo({
           break;
       }
 
-      setRedoStack(r => [...r, cmd]);
+      setRedoStack(r => capStack([...r, cmd]));
       setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
       return rest;
     });
@@ -179,7 +185,7 @@ export function useUndoRedo({
           break;
       }
 
-      setUndoStack(u => [...u, cmd]);
+      setUndoStack(u => capStack([...u, cmd]));
       setTimeout(() => { if (pageRef.current) queuePageSync(pageRef.current); }, 0);
       return rest;
     });

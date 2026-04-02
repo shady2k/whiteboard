@@ -50,6 +50,21 @@ const SHAPE_OPTIONS = {
   last: true,
 };
 
+// Shared offscreen canvas for marker rendering — avoids allocating a new one per draw
+let sharedOffscreen: OffscreenCanvas | HTMLCanvasElement | null = null;
+
+function getOffscreenCanvas(w: number, h: number): OffscreenCanvas | HTMLCanvasElement {
+  if (!sharedOffscreen) {
+    sharedOffscreen = typeof OffscreenCanvas !== 'undefined'
+      ? new OffscreenCanvas(w, h)
+      : (() => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; })();
+  }
+  // Resize only grows — setting width/height implicitly clears and resets the context
+  if (sharedOffscreen.width < w) sharedOffscreen.width = w;
+  if (sharedOffscreen.height < h) sharedOffscreen.height = h;
+  return sharedOffscreen;
+}
+
 const MARKER_OPTIONS = {
   thinning: 0,        // uniform width — markers don't taper
   smoothing: 0.5,
@@ -127,21 +142,16 @@ export function drawMarkerStroke(
   if (w <= 0 || h <= 0) return;
 
   // Draw opaque on offscreen canvas, then composite with alpha
-  let offscreen: OffscreenCanvas | HTMLCanvasElement;
-  if (typeof OffscreenCanvas !== 'undefined') {
-    offscreen = new OffscreenCanvas(w, h);
-  } else {
-    offscreen = document.createElement('canvas');
-    offscreen.width = w;
-    offscreen.height = h;
-  }
+  const offscreen = getOffscreenCanvas(w, h);
   const octx = offscreen.getContext('2d')! as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  octx.resetTransform();
+  octx.clearRect(0, 0, w, h);
   octx.translate(-minX, -minY);
   fillOutline(octx, outline, style.color);
 
   ctx.save();
   ctx.globalAlpha = 0.4;
-  ctx.drawImage(offscreen, minX, minY);
+  ctx.drawImage(offscreen, 0, 0, w, h, minX, minY, w, h);
   ctx.restore();
 }
 
