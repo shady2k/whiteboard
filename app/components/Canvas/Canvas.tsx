@@ -34,6 +34,7 @@ interface CanvasProps {
   pastePreview?: Snippet | null;
   onPasteConfirm?: (targetX: number, targetY: number) => void;
   selectionActive?: boolean;
+  selectionBounds?: { x: number; y: number; width: number; height: number } | null;
 }
 
 export default function Canvas({
@@ -55,6 +56,7 @@ export default function Canvas({
   pastePreview,
   onPasteConfirm,
   selectionActive,
+  selectionBounds,
 }: CanvasProps) {
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const inkCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -175,6 +177,41 @@ export default function Canvas({
       maxY: (-panY + h) / s,
     };
     renderAllStrokes(ctx, strokesRef.current, () => scheduleRedrawRef.current?.(false, true), draggingImageIdRef.current ?? undefined, visibleRect);
+    // Draw selection bounds on the ink canvas so they stay in sync with viewport
+    const selBounds = selectionBoundsRef.current;
+    if (selBounds) {
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 2 / s;
+      ctx.setLineDash([6 / s, 3 / s]);
+      ctx.strokeRect(selBounds.x, selBounds.y, selBounds.width, selBounds.height);
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+      ctx.fillRect(selBounds.x, selBounds.y, selBounds.width, selBounds.height);
+      ctx.setLineDash([]);
+    }
+    // Draw image selection (dashed border + handles) on ink canvas
+    const selImg = selectedImageForInkRef.current;
+    if (selImg) {
+      const { x, y, width, height } = selImg;
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 2 / s;
+      ctx.setLineDash([6 / s, 3 / s]);
+      ctx.strokeRect(x, y, width, height);
+      ctx.setLineDash([]);
+      const handleSize = 8 / s;
+      ctx.fillStyle = '#3b82f6';
+      for (const h of [
+        { hx: x, hy: y }, { hx: x + width, hy: y },
+        { hx: x, hy: y + height }, { hx: x + width, hy: y + height },
+      ]) {
+        ctx.fillRect(h.hx - handleSize / 2, h.hy - handleSize / 2, handleSize, handleSize);
+      }
+      const opacity = selImg.opacity ?? 1;
+      if (opacity < 1) {
+        ctx.fillStyle = '#fff';
+        ctx.font = `${12 / s}px sans-serif`;
+        ctx.fillText(`${Math.round(opacity * 100)}%`, x, y - 6 / s);
+      }
+    }
     ctx.restore();
   }, [getCtx, getViewportSize, getTransform]);
   useEffect(() => { redrawInkRef.current = redrawInk; }, [redrawInk]);
@@ -185,6 +222,9 @@ export default function Canvas({
     const { w, h } = getViewportSize();
     ctx.clearRect(0, 0, w, h);
   }, [getCtx, getViewportSize]);
+
+  const selectionBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const selectedImageForInkRef = useRef<ImageStroke | null>(null);
 
   const drawCommittedStrokeToInk = useCallback((stroke: Stroke) => {
     const ctx = getCtx(inkCanvasRef.current);
@@ -230,6 +270,13 @@ export default function Canvas({
     previewCanvasRef,
   });
 
+  // Sync selected image ref for ink canvas rendering
+  useEffect(() => {
+    selectedImageForInkRef.current = selectedImage;
+    redrawInkRef.current?.();
+    clearPreview();
+  }, [selectedImage, clearPreview]);
+
   // rAF-batched redraw scheduling
   const rafRef = useRef(0);
   const dirtyRef = useRef<{ bg: boolean; ink: boolean }>({ bg: false, ink: false });
@@ -243,9 +290,13 @@ export default function Canvas({
       const { bg: needBg, ink: needInk } = dirtyRef.current;
       dirtyRef.current = { bg: false, ink: false };
       if (needBg) redrawBackground();
-      if (needInk) redrawInk();
+      if (needInk) {
+        redrawInk();
+        // Clear stale selection drawing from preview canvas — ink canvas handles it now
+        if (selectedImageForInkRef.current || selectionBoundsRef.current) clearPreview();
+      }
     });
-  }, [redrawBackground, redrawInk]);
+  }, [redrawBackground, redrawInk, clearPreview]);
   useEffect(() => { scheduleRedrawRef.current = scheduleRedraw; }, [scheduleRedraw]);
 
   // Cached content bounds — recomputed when strokes change, used for pan clamping
@@ -342,6 +393,11 @@ export default function Canvas({
       redrawInk();
     }
   }, [scale, panOffset, redrawBackground, redrawInk]);
+
+  useEffect(() => {
+    selectionBoundsRef.current = selectionBounds ?? null;
+    redrawInkRef.current?.();
+  }, [selectionBounds]);
 
   // Track shift and space keys
   useEffect(() => {
@@ -496,6 +552,7 @@ export default function Canvas({
         const imgHit = findImageAtPoint(point);
         if (imgHit) {
           selectedImageRef.current = imgHit.stroke;
+          selectedImageForInkRef.current = imgHit.stroke;
           setSelectedImage(imgHit.stroke);
           setIsDragging(false);
           dragHandleRef.current = imgHit.handle;
@@ -504,14 +561,16 @@ export default function Canvas({
           draggingImageIdRef.current = null;
           isDrawingRef.current = true;
           clearPreview();
-          drawImageSelection(getCtx(previewCanvasRef.current)!, imgHit.stroke);
+          redrawInkRef.current?.();
           return;
         } else {
           selectedImageRef.current = null;
+          selectedImageForInkRef.current = null;
           setSelectedImage(null);
           setIsDragging(false);
           draggingImageIdRef.current = null;
           clearPreview();
+          redrawInkRef.current?.();
           // Start panning
           isPanningRef.current = true;
           panStartRef.current = { x: e.clientX, y: e.clientY };
@@ -632,6 +691,7 @@ export default function Canvas({
         }
 
         selectedImageRef.current = newImg;
+        selectedImageForInkRef.current = newImg;
 
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = requestAnimationFrame(() => {
@@ -855,8 +915,8 @@ export default function Canvas({
         }
 
         clearPreview();
-        const ctx = getCtx(previewCanvasRef.current);
-        if (ctx) drawImageSelection(ctx, newImg);
+        selectedImageForInkRef.current = newImg;
+        redrawInkRef.current?.();
         return;
       }
 
@@ -879,7 +939,7 @@ export default function Canvas({
           const selected = strokesRef.current.filter(s => strokeIntersectsRect(s, rect));
           if (selected.length > 0 && onSelectionCompleteRef.current) {
             onSelectionCompleteRef.current(selected, { x: rx, y: ry, width: rw, height: rh });
-            // Keep selection rectangle visible (don't clear preview)
+            clearPreview(); // Bounds now drawn on ink canvas via selectionBoundsRef
           } else {
             clearPreview();
           }

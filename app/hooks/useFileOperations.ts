@@ -36,14 +36,15 @@ interface UseFileOperationsArgs {
   handleStrokeComplete: (stroke: Stroke) => void;
   screenToCanvas: (sx: number, sy: number) => { x: number; y: number };
   mouseRef: React.RefObject<{ x: number; y: number }>;
+  scaleRef: React.RefObject<number>;
 }
 
-export function useFileOperations({ page, strokes, sessionName, handleStrokeComplete, screenToCanvas, mouseRef }: UseFileOperationsArgs) {
+export function useFileOperations({ page, strokes, sessionName, handleStrokeComplete, screenToCanvas, mouseRef, scaleRef }: UseFileOperationsArgs) {
   const [pdfPageDialog, setPdfPageDialog] = useState<{ pdf: import('pdfjs-dist').PDFDocumentProxy; numPages: number } | null>(null);
 
   // Upload image — offline-capable with stable local IDs
   // screenPos: optional screen coordinates to place the image at (defaults to current mouse position)
-  const uploadAndCreateImageStroke = useCallback(async (file: File | Blob, mimeType?: string, screenPos?: { x: number; y: number }): Promise<ImageStroke | null> => {
+  const uploadAndCreateImageStroke = useCallback(async (file: File | Blob, mimeType?: string, screenPos?: { x: number; y: number }, targetScreenWidth?: number): Promise<ImageStroke | null> => {
     const pageId = page?.id;
     if (!pageId) return null;
 
@@ -67,12 +68,26 @@ export function useFileOperations({ page, strokes, sessionName, handleStrokeComp
       const dims = await getImageDimensions(url);
       URL.revokeObjectURL(url);
 
-      const maxW = window.innerWidth * 0.6;
-      const maxH = window.innerHeight * 0.6;
-      let w = dims.width;
-      let h = dims.height;
-      if (w > maxW) { h *= maxW / w; w = maxW; }
-      if (h > maxH) { w *= maxH / h; h = maxH; }
+      // Divide by current zoom so content appears the same on-screen size
+      // regardless of zoom level (always readable as if at 100%)
+      const scale = scaleRef.current;
+      let w: number;
+      let h: number;
+
+      if (targetScreenWidth) {
+        // Document mode: size by readable target width
+        const aspect = dims.height / dims.width;
+        w = targetScreenWidth / scale;
+        h = w * aspect;
+      } else {
+        // Image mode: use natural dimensions, clamp to viewport
+        w = dims.width / scale;
+        h = dims.height / scale;
+        const maxW = window.innerWidth / scale;
+        const maxH = window.innerHeight / scale;
+        if (w > maxW) { h *= maxW / w; w = maxW; }
+        if (h > maxH) { w *= maxH / h; h = maxH; }
+      }
 
       // Place at cursor position (screen coords → canvas coords), centered on cursor
       const pos = screenPos ?? mouseRef.current;
@@ -94,7 +109,7 @@ export function useFileOperations({ page, strokes, sessionName, handleStrokeComp
       console.error('Failed to create image stroke:', e);
       return null;
     }
-  }, [page?.id, screenToCanvas, mouseRef]);
+  }, [page?.id, screenToCanvas, mouseRef, scaleRef]);
 
   // Clipboard paste handler
   useEffect(() => {
@@ -126,20 +141,28 @@ export function useFileOperations({ page, strokes, sessionName, handleStrokeComp
     for (let idx = 0; idx < pageNumbers.length; idx++) {
       const pageNum = pageNumbers[idx];
       const pdfPage = await pdf.getPage(pageNum);
-      const viewport = pdfPage.getViewport({ scale: 2 });
+      // Use page dimensions at scale 1 (72 DPI) for aspect ratio
+      const baseViewport = pdfPage.getViewport({ scale: 1 });
+      // Readable target: map 72 DPI PDF units to 96 DPI screen px, then bump to ~950px min
+      const targetScreenWidth = Math.max(950, baseViewport.width * (96 / 72));
+      // Rasterize at high res for crispness, capped to avoid memory spikes
+      const maxRenderWidth = 4096;
+      const idealRenderWidth = targetScreenWidth * window.devicePixelRatio;
+      const renderScale = Math.min(idealRenderWidth, maxRenderWidth) / baseViewport.width;
+      const renderViewport = pdfPage.getViewport({ scale: renderScale });
 
       const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+      canvas.width = renderViewport.width;
+      canvas.height = renderViewport.height;
       const ctx = canvas.getContext('2d')!;
 
-      await pdfPage.render({ canvasContext: ctx, viewport, canvas } as never).promise;
+      await pdfPage.render({ canvasContext: ctx, viewport: renderViewport, canvas } as never).promise;
 
       const blob = await new Promise<Blob>((resolve) =>
         canvas.toBlob(b => resolve(b!), 'image/png')
       );
 
-      const stroke = await uploadAndCreateImageStroke(blob, 'image/png');
+      const stroke = await uploadAndCreateImageStroke(blob, 'image/png', undefined, targetScreenWidth);
       if (stroke) {
         if (idx > 0) {
           stroke.y = stroke.y + idx * (stroke.height + 20);

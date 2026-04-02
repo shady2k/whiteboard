@@ -126,10 +126,8 @@ export function useImageDrag({
     if (onImageTransformRef.current) {
       onImageTransformRef.current(selectedImage.id, updated);
     }
-    clearPreview();
-    const ctx = getCtx(previewCanvasRef.current);
-    if (ctx) drawImageSelection(ctx, updated);
-  }, [selectedImage, clearPreview, getCtx, previewCanvasRef, drawImageSelection, onImageTransformRef]);
+    // Selection bounds redrawn by ink canvas via selectedImage state change
+  }, [selectedImage, onImageTransformRef]);
 
   // Handle delete selected image
   const handleDeleteImage = useCallback(() => {

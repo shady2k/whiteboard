@@ -218,6 +218,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
     handleStrokeComplete,
     screenToCanvas,
     mouseRef,
+    scaleRef,
   });
 
   const handleStrokeDelete = useCallback((strokeId: string) => {
@@ -433,6 +434,7 @@ export default function Whiteboard({ sessionId, initialPages, sessionName: initi
         pastePreview={null}
         onPasteConfirm={() => {}}
         selectionActive={!!pendingSelection}
+        selectionBounds={pendingSelection?.bounds ?? null}
       />
       {/* Selection action bar */}
       {pendingSelection && activeTool === 'select' && (
